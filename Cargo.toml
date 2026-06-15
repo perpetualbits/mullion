@@ -1,0 +1,23 @@
+[package]
+name = "tile-engine"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.70"
+description = "A general-purpose terminal UI tiling engine"
+license = "MIT"
+
+[lib]
+name = "tile_engine"
+path = "src/lib.rs"
+
+[[example]]
+name = "smoke"
+path = "examples/smoke.rs"
+
+[dependencies]
+bitflags = "2"
+crossterm = "0.28"
+unicode-segmentation = "1"
+unicode-width = "0.2"
+
+[dev-dependencies]
