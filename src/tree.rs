@@ -368,6 +368,31 @@ impl Tree {
             }
         }
     }
+
+    /// Add `delta` to the scroll offset of the carousel with the given `id`.
+    ///
+    /// Saturates at 0 on the low end; the upper bound is clamped at render /
+    /// solve time against the actual viewport, so this method need not know it.
+    /// No-op if `id` does not identify a `Carousel` in this tree.
+    pub fn scroll_by(&mut self, id: TileId, delta: i32) {
+        if let Some(Node::Carousel { scroll, .. }) = node_by_id_mut(&mut self.root, id) {
+            if delta >= 0 {
+                *scroll = scroll.saturating_add(delta as u16);
+            } else {
+                *scroll = scroll.saturating_sub((-delta) as u16);
+            }
+        }
+    }
+
+    /// Set the scroll offset of the carousel with the given `id`.
+    ///
+    /// Clamps to 0 on the low end; the upper bound is clamped at render /
+    /// solve time.  No-op if `id` does not identify a `Carousel`.
+    pub fn scroll_to(&mut self, id: TileId, offset: u16) {
+        if let Some(Node::Carousel { scroll, .. }) = node_by_id_mut(&mut self.root, id) {
+            *scroll = offset;
+        }
+    }
 }
 
 /// Build the `overrides` slice for [`render_shared`](crate::border::render_shared)
@@ -912,6 +937,60 @@ mod tests {
                 prop_assert_eq!(tree.focus(), Some(focused_id),
                     "focus id must survive swap roundtrip");
             }
+        }
+    }
+
+    // ── scroll_by / scroll_to ─────────────────────────────────────────────
+
+    fn carousel_tree(id: TileId, scroll: u16) -> Tree {
+        Tree::new(Node::Carousel {
+            id,
+            orientation: Orientation::Horizontal,
+            scroll,
+            children: (0u64..5).map(|i| (10u16, Node::Tile(i))).collect(),
+        })
+    }
+
+    #[test]
+    fn scroll_by_positive_increments_scroll() {
+        let mut tree = carousel_tree(1, 0);
+        tree.scroll_by(1, 5);
+        if let Some(Node::Carousel { scroll, .. }) = node_by_id(tree.root(), 1) {
+            assert_eq!(*scroll, 5);
+        }
+    }
+
+    #[test]
+    fn scroll_by_negative_decrements_saturates_at_zero() {
+        let mut tree = carousel_tree(1, 3);
+        tree.scroll_by(1, -10); // would go below 0 → saturate
+        if let Some(Node::Carousel { scroll, .. }) = node_by_id(tree.root(), 1) {
+            assert_eq!(*scroll, 0, "scroll must saturate at 0");
+        }
+    }
+
+    #[test]
+    fn scroll_to_sets_absolute_offset() {
+        let mut tree = carousel_tree(1, 0);
+        tree.scroll_to(1, 42);
+        if let Some(Node::Carousel { scroll, .. }) = node_by_id(tree.root(), 1) {
+            assert_eq!(*scroll, 42);
+        }
+    }
+
+    #[test]
+    fn scroll_by_noop_for_non_carousel_id() {
+        let mut tree = Tree::new(h_split(vec![tile(0), tile(1)]));
+        tree.scroll_by(0, 5); // id 0 is a Tile, not a Carousel → no-op; no panic
+        assert_eq!(leaves(tree.root()), vec![0, 1]);
+    }
+
+    #[test]
+    fn scroll_to_noop_for_missing_id() {
+        let mut tree = carousel_tree(1, 10);
+        tree.scroll_to(999, 0); // id 999 does not exist → no-op
+        if let Some(Node::Carousel { scroll, .. }) = node_by_id(tree.root(), 1) {
+            assert_eq!(*scroll, 10, "scroll must be unchanged");
         }
     }
 }

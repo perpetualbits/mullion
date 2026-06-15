@@ -214,6 +214,53 @@ pub enum Node {
     },
 }
 
+// ── Carousel visibility helper ────────────────────────────────────────────────
+
+/// Clamp `scroll` and collect the visible children for a carousel viewport.
+///
+/// Takes the children's main-axis `extents`, the requested `scroll` offset, and
+/// the viewport `main_extent`.  Returns `(clamped_scroll, entries)` where each
+/// entry is `(child_idx, virtual_start, extent)`:
+/// - `child_idx` — index into the caller's children slice.
+/// - `virtual_start` — offset in content space (0 = start of first child).
+/// - `extent` — the child's full main-axis extent, before viewport clipping.
+///
+/// Only children whose extent overlaps `[clamped_scroll, clamped_scroll +
+/// main_extent)` are included.  `virtual_start` uses `u32` to avoid overflow
+/// when many large children are present.
+///
+/// Used by both `solve_into` (for logical rects / focus) and `render_carousel`
+/// (for smooth-scroll rendering) so the two paths cannot diverge.
+pub(crate) fn carousel_visible_entries(
+    extents: &[u16],
+    scroll: u16,
+    main_extent: u16,
+) -> (u16, Vec<(usize, u32, u16)>) {
+    let total: u32 = extents.iter().map(|&e| e as u32).sum();
+    // max_scroll: clamp so the content tail is always flush with the viewport end.
+    let max_scroll = total.saturating_sub(main_extent as u32).min(u16::MAX as u32) as u16;
+    let clamped = scroll.min(max_scroll);
+
+    let vp_start = clamped as u32;
+    let vp_end = vp_start + main_extent as u32;
+
+    let mut entries: Vec<(usize, u32, u16)> = Vec::new();
+    let mut v_start: u32 = 0;
+
+    for (i, &ext) in extents.iter().enumerate() {
+        let v_end = v_start + ext as u32;
+        if v_end > vp_start && v_start < vp_end {
+            entries.push((i, v_start, ext));
+        }
+        v_start = v_end;
+        if v_start >= vp_end {
+            break; // no further children can intersect the viewport
+        }
+    }
+
+    (clamped, entries)
+}
+
 // ── Solver ───────────────────────────────────────────────────────────────────
 
 /// Solve the layout tree rooted at `node` within `area`.
@@ -254,7 +301,7 @@ pub fn solve(node: &mut Node, area: Rect) -> Vec<(TileId, Rect)> {
 /// For `Split`, partitions the area and recurses into every child.
 /// For `Carousel`, only the children that intersect the current viewport
 /// produce rects; `scroll` is clamped in place before the pass.
-fn solve_into(node: &mut Node, area: Rect, out: &mut Vec<(TileId, Rect)>) {
+pub(crate) fn solve_into(node: &mut Node, area: Rect, out: &mut Vec<(TileId, Rect)>) {
     match node {
         Node::Tile(id) => {
             out.push((*id, area));
@@ -294,48 +341,35 @@ fn solve_into(node: &mut Node, area: Rect, out: &mut Vec<(TileId, Rect)>) {
             }
             let axis = orientation.resolve(area);
             let main_extent = match axis {
-                Axis::Horizontal => area.width as i32,
-                Axis::Vertical => area.height as i32,
+                Axis::Horizontal => area.width,
+                Axis::Vertical => area.height,
             };
 
-            // Total content length along the main axis.
-            let total: i32 = children.iter().map(|(ext, _)| *ext as i32).sum();
+            // Collect extents separately so the shared helper can run without
+            // holding a borrow on `children` (needed for the mutable recurse below).
+            let extents: Vec<u16> = children.iter().map(|(e, _)| *e).collect();
+            let (clamped, entries) = carousel_visible_entries(&extents, *scroll, main_extent);
+            *scroll = clamped;
 
-            // Clamp scroll so the content tail is always flush with the viewport end.
-            // Saturating_sub via the i32 max(0) handles total < main_extent gracefully.
-            let max_scroll = (total - main_extent).max(0) as u16;
-            *scroll = (*scroll).min(max_scroll);
-            let scroll_val = *scroll; // snapshot after clamping to avoid re-borrow
-
-            // Viewport: [vp_start, vp_end) in screen coordinates.
-            let vp_start = match axis {
-                Axis::Horizontal => area.x as i32,
-                Axis::Vertical => area.y as i32,
+            let vp_main_origin = match axis {
+                Axis::Horizontal => area.x,
+                Axis::Vertical => area.y,
             };
-            let vp_end = vp_start + main_extent;
 
-            // First child's screen origin; negative when scroll > 0 (content starts before the viewport).
-            let mut pos = vp_start - scroll_val as i32;
+            for (child_idx, v_start, ext) in entries {
+                // Clip the child's content span to the viewport.
+                let vis_content_start = (v_start as u32).max(clamped as u32);
+                let vis_content_end =
+                    (v_start as u32 + ext as u32).min(clamped as u32 + main_extent as u32);
+                let vis_len = (vis_content_end - vis_content_start) as u16;
+                // Screen offset from viewport origin for the visible portion.
+                let screen_start = vp_main_origin + (vis_content_start - clamped as u32) as u16;
 
-            for (ext, child) in children.iter_mut() {
-                let child_start = pos;
-                let child_end = pos + *ext as i32;
-                pos = child_end; // advance before any `continue` so position is always updated
-
-                // Intersect child span with viewport; skip entirely if no overlap (virtualization).
-                let vis_start = child_start.max(vp_start);
-                let vis_end = child_end.min(vp_end);
-                if vis_start >= vis_end {
-                    continue;
-                }
-
-                // vis_start >= vp_start >= 0, so the cast to u16 is safe.
-                let vis_len = (vis_end - vis_start) as u16;
                 let child_area = match axis {
-                    Axis::Horizontal => Rect::new(vis_start as u16, area.y, vis_len, area.height),
-                    Axis::Vertical => Rect::new(area.x, vis_start as u16, area.width, vis_len),
+                    Axis::Horizontal => Rect::new(screen_start, area.y, vis_len, area.height),
+                    Axis::Vertical => Rect::new(area.x, screen_start, area.width, vis_len),
                 };
-                solve_into(child, child_area, out);
+                solve_into(&mut children[child_idx].1, child_area, out);
             }
         }
     }

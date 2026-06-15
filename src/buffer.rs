@@ -264,6 +264,65 @@ impl Buffer {
         cx
     }
 
+    /// Copy `src_rect` of `src` into `self` with its top-left at `(dst_x, dst_y)`.
+    ///
+    /// Clips both the source rect (to `src.area`) and the destination region (to
+    /// `self.area`).  Wide graphemes are handled at both boundaries:
+    ///
+    /// - A 2-wide grapheme whose left cell is inside `src_rect` but whose
+    ///   continuation is outside the right edge is replaced by a space at the
+    ///   destination — no half-glyph.
+    /// - A continuation cell at the *leftmost column* of `src_rect` (whose lead
+    ///   is therefore outside `src_rect`) is replaced by a space — no orphan
+    ///   continuation.
+    /// - A 2-wide grapheme that would overflow the destination's right edge is
+    ///   similarly replaced by a space.
+    /// - Interior continuation cells (whose lead was already written to the
+    ///   destination) are left for `set` to manage automatically.
+    pub fn blit(&mut self, src: &Buffer, src_rect: Rect, dst_x: u16, dst_y: u16) {
+        let src_rect = src.area.intersection(src_rect);
+        if src_rect.is_empty() {
+            return;
+        }
+        for row in src_rect.y..src_rect.bottom() {
+            let dy = dst_y.saturating_add(row - src_rect.y);
+            // Skip rows that fall outside the destination buffer.
+            if dy < self.area.y || dy >= self.area.bottom() {
+                continue;
+            }
+            for col in src_rect.x..src_rect.right() {
+                let dx = dst_x.saturating_add(col - src_rect.x);
+                if dx >= self.area.right() {
+                    break; // remaining columns in this row are also out of bounds
+                }
+                if dx < self.area.x {
+                    continue;
+                }
+
+                let cell = src.get(col, row);
+
+                if cell.is_continuation() {
+                    if col == src_rect.x {
+                        // Lead is outside src_rect on the left; write a space to avoid
+                        // an orphan continuation in the destination.
+                        self.set(dx, dy, Cell::default());
+                    }
+                    // else: the lead was already written and self.set handled the continuation.
+                    continue;
+                }
+
+                let w = UnicodeWidthStr::width(cell.symbol.as_str());
+                if w == 2 && (col + 1 >= src_rect.right() || dx + 1 >= self.area.right()) {
+                    // Wide grapheme cut by the source rect's right edge or the
+                    // destination's right edge — write a space placeholder instead.
+                    self.set(dx, dy, Cell::default());
+                } else {
+                    self.set(dx, dy, cell.clone());
+                }
+            }
+        }
+    }
+
     /// Reset every cell to the default (a space with the default style).
     pub fn reset(&mut self) {
         for c in &mut self.cells {
@@ -424,6 +483,68 @@ mod tests {
         // Only the wide cell itself (col 0) should appear, not the continuation (col 1).
         assert_eq!(d.len(), 1);
         assert_eq!(d[0].0, 0);
+    }
+
+    // ── blit ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn blit_copies_sub_rect() {
+        // Source: 6×2 with "Hello!" on row 0 and "World!" on row 1.
+        let mut src = buf(6, 2);
+        src.set_string(0, 0, "Hello!", Style::default());
+        src.set_string(0, 1, "World!", Style::default());
+        // Copy columns 1..4 (3 chars), row 0 only.
+        let mut dst = buf(6, 2);
+        dst.blit(&src, Rect::new(1, 0, 3, 1), 0, 0);
+        assert_eq!(dst.get(0, 0).symbol, "e");
+        assert_eq!(dst.get(1, 0).symbol, "l");
+        assert_eq!(dst.get(2, 0).symbol, "l");
+        // Outside the blitted region: untouched (default space).
+        assert_eq!(dst.get(3, 0).symbol, " ");
+        assert_eq!(dst.get(0, 1).symbol, " ");
+    }
+
+    #[test]
+    fn blit_clips_at_dst_right_edge() {
+        let mut src = buf(10, 1);
+        src.set_string(0, 0, "ABCDEFGHIJ", Style::default());
+        // dst is only 4 wide; blit src fully at dst (0,0).
+        let mut dst = buf(4, 1);
+        dst.blit(&src, Rect::new(0, 0, 10, 1), 0, 0);
+        assert_eq!(dst.get(0, 0).symbol, "A");
+        assert_eq!(dst.get(3, 0).symbol, "D");
+        // Nothing outside dst (buf only has 4 cols, so nothing to check).
+    }
+
+    #[test]
+    fn blit_wide_grapheme_split_at_src_right_edge_is_blanked() {
+        // Source: "A世B" → cols 0='A', 1='世'(wide), 2=continuation, 3='B'
+        let mut src = buf(5, 1);
+        src.set_string(0, 0, "A世B", Style::default());
+        assert!(src.get(2, 0).is_continuation());
+        // Blit src_rect = [0, 2) — includes '世' (col 1) but NOT its continuation (col 2).
+        let mut dst = buf(5, 1);
+        dst.blit(&src, Rect::new(0, 0, 2, 1), 0, 0);
+        // 'A' should copy normally.
+        assert_eq!(dst.get(0, 0).symbol, "A");
+        // '世' is cut → must be a space, not the wide grapheme.
+        assert_eq!(dst.get(1, 0).symbol, " ", "cut wide grapheme must be blanked");
+        assert!(!dst.get(1, 0).is_continuation());
+    }
+
+    #[test]
+    fn blit_continuation_at_src_left_edge_is_blanked() {
+        // Source: "世B" → col 0='世'(wide), 1=continuation, 2='B'
+        let mut src = buf(5, 1);
+        src.set_string(0, 0, "世B", Style::default());
+        // Blit src_rect = [1, 3) — starts at the continuation cell of '世'.
+        let mut dst = buf(5, 1);
+        dst.blit(&src, Rect::new(1, 0, 2, 1), 0, 0);
+        // col 0 of dst (from src col 1 = continuation) must be a space.
+        assert_eq!(dst.get(0, 0).symbol, " ", "orphan continuation must be blanked");
+        assert!(!dst.get(0, 0).is_continuation());
+        // 'B' (src col 2) → dst col 1.
+        assert_eq!(dst.get(1, 0).symbol, "B");
     }
 
     #[test]
