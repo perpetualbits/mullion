@@ -72,7 +72,7 @@ impl Orientation {
     /// 3. Flip the axis only when the candidate is strictly better than the
     ///    current axis by more than `margin_pct` percent of the relevant
     ///    dimension (hysteresis).
-    fn resolve(&mut self, area: Rect) -> Axis {
+    pub(crate) fn resolve(&mut self, area: Rect) -> Axis {
         match self {
             Orientation::Horizontal => Axis::Horizontal,
             Orientation::Vertical => Axis::Vertical,
@@ -285,7 +285,7 @@ fn solve_into(node: &mut Node, area: Rect, out: &mut Vec<(TileId, Rect)>) {
 ///   sizes are never negative and never exceed `total`.
 ///
 /// Returns a `Vec<u16>` of the same length as `children`.
-fn partition(children: &[(Constraint, Node)], total: u16) -> Vec<u16> {
+pub(crate) fn partition(children: &[(Constraint, Node)], total: u16) -> Vec<u16> {
     let n = children.len();
     let mut sizes = vec![0u16; n];
 

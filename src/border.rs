@@ -40,7 +40,8 @@ use bitflags::bitflags;
 use crate::{
     buffer::Buffer,
     geometry::Rect,
-    layout::TileId,
+    junction::{EdgeGrid, resolve as resolve_junction},
+    layout::{Axis, Node, TileId, partition},
     style::Style,
 };
 
@@ -310,6 +311,198 @@ pub fn frame_tiles(
 
         (id, Rect::new(x, y, w, h))
     }).collect()
+}
+
+// ── render_shared ─────────────────────────────────────────────────────────────
+
+/// Render a layout tree in **shared-border mode** and return each leaf's content rect.
+///
+/// In shared-border mode a single outer frame is drawn around `area`, and
+/// adjacent tiles share a single divider line rather than drawing two touching
+/// borders.  Junction glyphs (`├ ┤ ┬ ┴ ┼` and all mixed-weight variants) emerge
+/// automatically from the [`EdgeGrid`] — none are special-cased here.
+///
+/// ## Layout rules
+///
+/// 1. The outer frame occupies one cell on each side of `area`.
+/// 2. A `Split` node divides its inner area (the frame-minus-1-cell inset) among
+///    its children, reserving one cell per internal divider: `n` children →
+///    `n−1` dividers.  The Phase 1 sizing algorithm assigns widths/heights from
+///    the reduced extent.
+/// 3. Every leaf tile's returned content rect is the space inside all surrounding
+///    borders — the caller does not inset again.
+///
+/// ## Overrides
+///
+/// Each `(TileId, LineWeight)` pair in `overrides` adds that tile's four bordering
+/// edges to the grid at the given weight.  Because the merge rule takes the
+/// stronger weight, a heavy override thickens the focused tile's edges and
+/// produces correct mixed-weight junction glyphs at shared corners/tees.
+///
+/// ## Degenerate inputs
+///
+/// `area` smaller than 2×2, or more dividers than available space: never panics;
+/// draws what fits; zero-area content rects are returned for tiles with no room.
+///
+/// # Parameters
+/// - `buf`: the buffer to paint into; cells are left untouched where no border arm
+///   is present (i.e. the tile interiors remain blank).
+/// - `root`: mutable so that `Orientation::Adaptive` can record its chosen axis.
+/// - `overrides`: weight overrides keyed by `TileId`; may be empty.
+/// # Returns
+/// Flat list of `(TileId, content_rect)` in depth-first, left-to-right order.
+pub fn render_shared(
+    buf: &mut Buffer,
+    root: &mut Node,
+    area: Rect,
+    weight: LineWeight,
+    style: &Style,
+    overrides: &[(TileId, LineWeight)],
+) -> Vec<(TileId, Rect)> {
+    let mut grid = EdgeGrid::new(area);
+
+    // Outer frame: one cell on all four sides.
+    grid.add_box(area, weight);
+
+    // Recursively add internal dividers and collect (id, box_rect, content_rect).
+    let mut tile_info: Vec<(TileId, Rect, Rect)> = Vec::new();
+    add_dividers(&mut grid, root, area, weight, &mut tile_info);
+
+    // Per-tile weight overrides: add each tile's four bordering edges at the
+    // override weight; the merge rule ensures heavier always wins.
+    for &(id, ow) in overrides {
+        if let Some(&(_, box_rect, _)) = tile_info.iter().find(|&&(tid, _, _)| tid == id) {
+            grid.add_box(box_rect, ow);
+        }
+    }
+
+    // Resolve every cell in the grid and write glyphs to `buf`.
+    // `set_grapheme` silently ignores out-of-bounds positions, so no clip needed.
+    let mut tmp = [0u8; 4];
+    for y in area.y..area.bottom() {
+        for x in area.x..area.right() {
+            if let Some(cell) = grid.get(x, y) {
+                if let Some(ch) = resolve_junction(cell) {
+                    buf.set_grapheme(x, y, ch.encode_utf8(&mut tmp), *style);
+                }
+            }
+        }
+    }
+
+    tile_info.into_iter().map(|(id, _, content)| (id, content)).collect()
+}
+
+/// Recursively add internal divider lines to `grid` and collect tile metadata.
+///
+/// Each recursive call is handed the full `box_rect` of the node — including the
+/// one-cell border that surrounds it.  For a `Tile`, the content rect is the
+/// inner deflation of `box_rect` and is recorded in `out`.  For a `Split`, the
+/// inner area is partitioned among children, a divider line is added between each
+/// consecutive pair of children, and the function recurses into each child with
+/// its own `box_rect`.
+///
+/// The outer frame is *not* re-added here — it was added once by the caller.
+/// Dividers that happen to coincide with the outer frame (e.g. when a child's
+/// box_rect touches the root area) are merged harmlessly by the EdgeGrid.
+fn add_dividers(
+    grid: &mut EdgeGrid,
+    node: &mut Node,
+    box_rect: Rect,
+    weight: LineWeight,
+    out: &mut Vec<(TileId, Rect, Rect)>,
+) {
+    match node {
+        Node::Tile(id) => {
+            // Leaf: record the border rect and its deflated content rect.
+            out.push((*id, box_rect, deflate(box_rect)));
+        }
+        Node::Split { orientation, children } => {
+            if children.is_empty() {
+                return;
+            }
+            let inner = deflate(box_rect);
+            let axis = orientation.resolve(inner);
+            let n = children.len();
+
+            // Reserve one cell per internal divider from the content extent.
+            let n_div = (n - 1) as u16;
+            let available = match axis {
+                Axis::Horizontal => inner.width.saturating_sub(n_div),
+                Axis::Vertical => inner.height.saturating_sub(n_div),
+            };
+
+            let sizes = partition(children, available);
+
+            // Starting position (in content coordinates) for the first child.
+            let mut pos = match axis {
+                Axis::Horizontal => inner.x,
+                Axis::Vertical => inner.y,
+            };
+
+            for (i, ((_, child), &size)) in children.iter_mut().zip(sizes.iter()).enumerate() {
+                // Compute the full box_rect for this child.  The first child's
+                // near edge is the parent's outer border; subsequent children's
+                // near edge is the shared divider one cell before `pos`.
+                let child_box = match axis {
+                    Axis::Horizontal => {
+                        let left = if i == 0 { box_rect.x } else { pos.saturating_sub(1) };
+                        let right = if i + 1 == n {
+                            box_rect.right().saturating_sub(1)
+                        } else {
+                            pos.saturating_add(size)
+                        };
+                        Rect::new(left, box_rect.y, right.saturating_sub(left).saturating_add(1), box_rect.height)
+                    }
+                    Axis::Vertical => {
+                        let top = if i == 0 { box_rect.y } else { pos.saturating_sub(1) };
+                        let bot = if i + 1 == n {
+                            box_rect.bottom().saturating_sub(1)
+                        } else {
+                            pos.saturating_add(size)
+                        };
+                        Rect::new(box_rect.x, top, box_rect.width, bot.saturating_sub(top).saturating_add(1))
+                    }
+                };
+
+                // Draw the divider between this child and the next (skip for the last child).
+                if i + 1 < n {
+                    let div = pos.saturating_add(size);
+                    match axis {
+                        Axis::Horizontal => grid.add_v_line(
+                            box_rect.y,
+                            box_rect.bottom().saturating_sub(1),
+                            div,
+                            weight,
+                        ),
+                        Axis::Vertical => grid.add_h_line(
+                            box_rect.x,
+                            box_rect.right().saturating_sub(1),
+                            div,
+                            weight,
+                        ),
+                    }
+                }
+
+                add_dividers(grid, child, child_box, weight, out);
+
+                // Advance past this child's content and the following divider.
+                pos = pos.saturating_add(size).saturating_add(1);
+            }
+        }
+    }
+}
+
+/// Deflate `r` by one cell on each side (saturating).
+///
+/// Returns the inner content region of a bordered tile: if any dimension is less
+/// than 2 the result has zero extent on that axis.
+fn deflate(r: Rect) -> Rect {
+    Rect::new(
+        r.x.saturating_add(1),
+        r.y.saturating_add(1),
+        r.width.saturating_sub(2),
+        r.height.saturating_sub(2),
+    )
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
