@@ -47,10 +47,11 @@ pub mod backend;
 pub mod border;
 pub mod buffer;
 pub mod geometry;
-pub mod layout;
 pub mod junction;
+pub mod layout;
 pub mod style;
 pub mod terminal;
+pub mod tree;
 
 pub use backend::{Backend, CrosstermBackend, TestBackend};
 pub use border::{draw_box, frame_tiles, render_shared, BorderStyle, Borders, CornerStyle, LineWeight};
@@ -59,3 +60,4 @@ pub use geometry::Rect;
 pub use layout::{Constraint, Node, Orientation, Size, TileId};
 pub use style::{Color, Modifier, Style};
 pub use terminal::{poll_event, read_event, Terminal};
+pub use tree::{focus_override, focus_path, leaves, tile_id_of, Tree};
