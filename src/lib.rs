@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 // Copyright (C) 2026  Epsilon Null Operation
-//! # tile-engine
+//! # mullion
 //!
 //! A general-purpose, reusable terminal UI tiling engine.
 //!
@@ -32,7 +32,7 @@
 //!
 //! ```no_run
 //! use std::io;
-//! use tile_engine::{Terminal, backend::CrosstermBackend, style::Style};
+//! use mullion::{Terminal, backend::CrosstermBackend, style::Style};
 //!
 //! let mut term = Terminal::new(CrosstermBackend::new(io::stdout()))?;
 //! term.enter()?;

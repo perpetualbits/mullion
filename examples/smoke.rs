@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 // Copyright (C) 2026  Epsilon Null Operation
-//! Smoke test for tile-engine Phase 0.
+//! Smoke test for mullion Phase 0.
 //!
 //! Enters the alternate screen, draws a few lines demonstrating wide graphemes,
 //! combining marks, and terminal-dimension display.  Redraws automatically on
@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use crossterm::event::{Event, KeyCode, KeyEvent};
 
-use tile_engine::{
+use mullion::{
     backend::CrosstermBackend,
     poll_event,
     style::{Color, Modifier, Style},
@@ -62,7 +62,7 @@ fn run(term: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<()> {
                 .add_modifier(Modifier::BOLD);
             let normal = Style::default();
 
-            buf.set_string(0, 0, "tile-engine smoke test — press q to quit", title_style);
+            buf.set_string(0, 0, "mullion smoke test — press q to quit", title_style);
             // Two full-width CJK characters (each 2 columns) and one emoji (2 columns).
             buf.set_string(0, 1, "Wide glyphs: 世界 🌍 (4 cols + 2 cols)", normal);
             // é decomposed as base 'e' + combining acute; must land in one cell.

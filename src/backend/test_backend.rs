@@ -134,8 +134,8 @@ impl Backend for TestBackend {
 ///
 /// # Example
 /// ```
-/// use tile_engine::{Terminal, backend::TestBackend, geometry::Rect, style::Style};
-/// use tile_engine::assert_backend_snapshot;
+/// use mullion::{Terminal, backend::TestBackend, geometry::Rect, style::Style};
+/// use mullion::assert_backend_snapshot;
 ///
 /// let backend = TestBackend::new(5, 1);
 /// let mut term = Terminal::new(backend).unwrap();

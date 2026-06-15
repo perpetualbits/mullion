@@ -97,7 +97,7 @@ impl<W: Write> Drop for CrosstermBackend<W> {
     }
 }
 
-/// Map a tile-engine [`Color`] to a crossterm [`CtColor`].
+/// Map a mullion [`Color`] to a crossterm [`CtColor`].
 ///
 /// The 16-color mapping follows the standard ANSI 8+8 palette.  The three
 /// names that are easiest to confuse:

@@ -1,6 +1,6 @@
 # Tiling Engine — Roadmap
 
-> Working name: **`tile-engine`** (provisional — see Open Questions).
+> Crate name: **`mullion`**.
 > A general, reusable terminal UI tiling engine in Rust. First consumer: **apptop**.
 > Status: design phase. Programming is done by Claude Code; design, idea-shaping,
 > and prompt-writing are done jointly.
@@ -238,7 +238,7 @@ navigation stack over one tree, so `Esc` means exactly one thing everywhere.
 
 ## 6. Crate / API surface
 
-- **Library crate** (`tile-engine`) — layout tree, cell buffer, backends,
+- **Library crate** (`mullion`) — layout tree, cell buffer, backends,
   junction grid, focus/input/zoom, border labels, theming.
 - **apptop** depends on it as the first consumer; apptop supplies content + key
   handlers and builds its layout tree.
@@ -295,7 +295,7 @@ the true foundation and is fully testable in isolation.
 
 ## 8. Open questions / decisions to make
 
-- **Name** of the engine and crate (`tile-engine` is a placeholder).
+- **Name** of the engine and crate: resolved → `mullion`.
 - **Constraint solver:** hand-rolled ratio+min/max vs a `cassowary`-style solver.
   Start simple; upgrade only if the simple model can't express needed layouts.
 - **Directional focus** (`hjkl` neighbor search) in v1, or `Tab`-only first?

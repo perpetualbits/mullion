@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 // Copyright (C) 2026  Epsilon Null Operation
-use tile_engine::{geometry::Rect, style::Style, Buffer, Cell};
+use mullion::{geometry::Rect, style::Style, Buffer, Cell};
 use unicode_width::UnicodeWidthStr;
 
 // Fix 3: wide grapheme that doesn't fit, landing on an existing continuation cell.

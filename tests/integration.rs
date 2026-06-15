@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 // Copyright (C) 2026  Epsilon Null Operation
-use tile_engine::{
+use mullion::{
     assert_backend_snapshot,
     backend::TestBackend,
     style::{Color, Style},
@@ -48,8 +48,8 @@ fn snapshot_wide_glyphs() {
 // emitted when the style changes.
 #[test]
 fn crossterm_backend_style_minimization() {
-    use tile_engine::backend::{Backend, CrosstermBackend};
-    use tile_engine::Cell;
+    use mullion::backend::{Backend, CrosstermBackend};
+    use mullion::Cell;
 
     let mut buf: Vec<u8> = Vec::new();
     let mut backend = CrosstermBackend::new(&mut buf);
@@ -91,8 +91,8 @@ fn crossterm_backend_style_minimization() {
 
 #[test]
 fn crossterm_backend_sync_markers_wrap_frame() {
-    use tile_engine::backend::{Backend, CrosstermBackend};
-    use tile_engine::Cell;
+    use mullion::backend::{Backend, CrosstermBackend};
+    use mullion::Cell;
 
     let mut buf: Vec<u8> = Vec::new();
     let mut backend = CrosstermBackend::new(&mut buf);

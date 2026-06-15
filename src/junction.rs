@@ -6,7 +6,7 @@
 //! ## Typical workflow
 //!
 //! ```
-//! use tile_engine::{
+//! use mullion::{
 //!     border::LineWeight,
 //!     geometry::Rect,
 //!     junction::{EdgeGrid, resolve},

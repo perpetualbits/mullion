@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 // Copyright (C) 2026  Epsilon Null Operation
-use tile_engine::geometry::Rect;
-use tile_engine::layout::{solve, Constraint, Node, Orientation, Size};
+use mullion::geometry::Rect;
+use mullion::layout::{solve, Constraint, Node, Orientation, Size};
 
 /// Classify a 2-tile split's axis from the produced rects.
 fn axis_of(rects: &[(u64, Rect)]) -> &'static str {

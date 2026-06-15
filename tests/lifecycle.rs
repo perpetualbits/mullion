@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 // Copyright (C) 2026  Epsilon Null Operation
-use tile_engine::backend::{Backend, CrosstermBackend};
+use mullion::backend::{Backend, CrosstermBackend};
 
 const LEAVE_ALT: &str = "\x1b[?1049l";
 const SHOW_CURSOR: &str = "\x1b[?25h";

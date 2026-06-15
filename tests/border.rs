@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 // Copyright (C) 2026  Epsilon Null Operation
-use tile_engine::{
+use mullion::{
     assert_backend_snapshot,
     backend::TestBackend,
     border::{draw_box, frame_tiles, render_shared, BorderStyle, Borders, CornerStyle, LineWeight},

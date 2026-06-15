@@ -228,6 +228,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "mullion"
+version = "0.1.0"
+dependencies = [
+ "bitflags",
+ "crossterm",
+ "proptest",
+ "unicode-segmentation",
+ "unicode-width",
+]
+
+[[package]]
 name = "num-traits"
 version = "0.2.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -543,17 +554,6 @@ dependencies = [
  "once_cell",
  "rustix 1.1.4",
  "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "tile-engine"
-version = "0.1.0"
-dependencies = [
- "bitflags",
- "crossterm",
- "proptest",
- "unicode-segmentation",
- "unicode-width",
 ]
 
 [[package]]
