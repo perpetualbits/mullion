@@ -190,11 +190,17 @@ pub enum Node {
 /// The solver guarantees:
 /// - Every returned `Rect` is contained within `area` (or its recursive
 ///   sub-area for nested splits).
-/// - The union of all returned rects exactly tiles `area` (no gaps, no
-///   overlaps) when the tree contains at least one `Fill` child at every
-///   split level.
-/// - No `Rect` is zero-sized — if space runs out, the remaining children
-///   share zero width/height gracefully without panicking.
+/// - The children of a split exactly tile their assigned area when at least
+///   one `Fill` child has enough `max` headroom to absorb the leftover pool.
+///   If every `Fill` at a level is pinned at its `max` before the pool is
+///   exhausted, the residual is left unassigned — `max` wins over exact tiling
+///   in this documented edge case.
+/// - A `Split` whose children are all `Fixed` or `Percent` and whose sizes
+///   sum to less than the available space leaves the trailing space unassigned
+///   (no implicit stretch).  This is intended.
+/// - If space runs out, remaining children receive zero-sized rects; no panic
+///   occurs.  `min` is best-effort when the area cannot fit every child's
+///   minimum.
 ///
 /// `node` is taken as `&mut` so that `Orientation::Adaptive` can store the
 /// chosen axis in `last` for hysteresis on subsequent solves.
@@ -244,21 +250,43 @@ fn solve_into(node: &mut Node, area: Rect, out: &mut Vec<(TileId, Rect)>) {
 
 /// Partition `total` cells among `children` according to their constraints.
 ///
-/// Algorithm:
-/// 1. Allocate `Fixed` children first (clamped by their `min`/`max`).
-/// 2. Allocate `Percent` children from what remains (clamped likewise).
-/// 3. Distribute the remaining cells proportionally among `Fill` children
-///    using integer weights.  Rounding remainder is given to the **last**
-///    `Fill` child so that the sum of all sizes equals `total` exactly.
-/// 4. If over-constrained (more cells allocated than available), trim
-///    children from the end until the total fits.
+/// ## Algorithm
+///
+/// 1. **Fixed pass** — each `Fixed(n)` child receives `clamp(n, min, max)`.
+/// 2. **Percent pass** — each `Percent(p)` child receives
+///    `clamp(total*p/100, min, max)` (fraction of the *original* total).
+/// 3. **Fill pass (water-filling)** — the pool (`total − Σ Fixed − Σ Percent`)
+///    is shared among `Fill` children:
+///    - Every Fill is seeded at its `min`.
+///    - The leftover above those seeds is distributed proportionally by weight
+///      among fills that still have headroom (`size < max`).  Fills whose
+///      proportional share would push them past `max` are *pinned* at `max`
+///      and removed from the active set; their un-awarded excess stays in the
+///      pool for subsequent rounds.
+///    - Rounds repeat until leftover is exhausted or all fills are pinned.
+///    - After a round that pins nothing, the integer rounding remainder is
+///      handed to the last fills backward (each capped at its `max`).
+///    - `Fill(0)` children receive only their `min`; if *all* active fills
+///      have weight 0, the remainder still goes to the last one.
+/// 4. **Over-constrained pass** — if the sum exceeds `total` (e.g. Fill mins
+///    alone overflow the pool), children are trimmed from the end; `min` is
+///    best-effort when the area cannot fit every minimum.
+///
+/// ## Guarantees
+///
+/// - Sums to `total` exactly when at least one Fill has enough `max` headroom.
+/// - When every Fill is pinned at its `max` before the pool is exhausted, the
+///   residual is left unassigned (`max` wins over exact tiling).
+/// - A split with no Fill children leaves any trailing space unassigned.
+/// - Trimming policy: greedy in declaration order; later children yield first;
+///   sizes are never negative and never exceed `total`.
 ///
 /// Returns a `Vec<u16>` of the same length as `children`.
 fn partition(children: &[(Constraint, Node)], total: u16) -> Vec<u16> {
     let n = children.len();
     let mut sizes = vec![0u16; n];
 
-    // Pass 1: Fixed children.
+    // Pass 1: Fixed children receive their requested size, clamped to [min, max].
     let mut used: u32 = 0;
     for (i, (c, _)) in children.iter().enumerate() {
         if let Size::Fixed(v) = c.size {
@@ -268,7 +296,7 @@ fn partition(children: &[(Constraint, Node)], total: u16) -> Vec<u16> {
         }
     }
 
-    // Pass 2: Percent children (of the original total, not the remainder).
+    // Pass 2: Percent children take a fraction of the *original* total, clamped.
     for (i, (c, _)) in children.iter().enumerate() {
         if let Size::Percent(p) = c.size {
             let raw = (total as u32 * p.min(100) as u32 / 100) as u16;
@@ -278,33 +306,96 @@ fn partition(children: &[(Constraint, Node)], total: u16) -> Vec<u16> {
         }
     }
 
-    // Pass 3: Fill children share the remainder proportionally.
-    let remainder = (total as u32).saturating_sub(used);
-    let total_weight: u32 = children.iter().map(|(c, _)| {
-        if let Size::Fill(w) = c.size { w as u32 } else { 0 }
-    }).sum();
+    // Pass 3: Fill children divide the remaining pool via water-filling.
+    // `pool` = cells left after Fixed and Percent children are satisfied.
+    let pool = (total as u32).saturating_sub(used);
 
-    let mut fill_used: u32 = 0;
-    // Find the index of the last Fill child — it absorbs the rounding remainder.
-    let last_fill_idx = children.iter().rposition(|(c, _)| matches!(c.size, Size::Fill(_)));
+    // Collect indices of Fill children; all other slots are already settled.
+    let fill_indices: Vec<usize> = children.iter().enumerate()
+        .filter_map(|(i, (c, _))| if matches!(c.size, Size::Fill(_)) { Some(i) } else { None })
+        .collect();
 
-    for (i, (c, _)) in children.iter().enumerate() {
-        if let Size::Fill(w) = c.size {
-            let raw = if Some(i) == last_fill_idx {
-                // Give last Fill child the residual to avoid rounding gaps.
-                (remainder.saturating_sub(fill_used)) as u16
-            } else {
-                // Proportional share; zero when total_weight is zero.
-                (remainder * w as u32).checked_div(total_weight).unwrap_or(0) as u16
-            };
-            let clamped = clamp(raw, c.min, c.max);
-            sizes[i] = clamped;
-            fill_used += clamped as u32;
+    if !fill_indices.is_empty() {
+        // Step 3a: seed every Fill at its min, clamped to max to handle the
+        // degenerate case where a caller supplies min > max.
+        let mut seeded_sum: u32 = 0;
+        for &i in &fill_indices {
+            let seed = children[i].0.min.min(children[i].0.max);
+            sizes[i] = seed;
+            seeded_sum += seed as u32;
+        }
+
+        // leftover = cells above the seeds available to distribute.  Saturates
+        // at 0 if the seeds already exceed the pool; pass 4 will handle that.
+        let mut leftover = pool.saturating_sub(seeded_sum);
+
+        // Water-filling loop: each round distributes `leftover` proportionally
+        // among fills that still have headroom, pinning any that hit their max.
+        loop {
+            // Active set: fills that have room to grow above their current size.
+            let active: Vec<usize> = fill_indices.iter()
+                .copied()
+                .filter(|&i| sizes[i] < children[i].0.max)
+                .collect();
+
+            if active.is_empty() || leftover == 0 {
+                break;
+            }
+
+            // Total weight of active fills (0 when all remaining are Fill(0)).
+            let active_weight: u32 = active.iter()
+                .map(|&i| if let Size::Fill(w) = children[i].0.size { w as u32 } else { 0 })
+                .sum();
+
+            // Distribute proportional shares; pin any fill that would exceed max.
+            let mut any_pinned = false;
+            let mut round_assigned: u32 = 0;
+            for &i in &active {
+                let w = if let Size::Fill(w) = children[i].0.size { w as u32 } else { 0 };
+                // Proportional share; 0 for weight-0 fills.  checked_div guards
+                // against the all-zero-weight case (share becomes 0, handled
+                // by the no-pin branch below which then distributes the full
+                // leftover as "remainder" to the last fill).
+                let share = (leftover * w).checked_div(active_weight).unwrap_or(0);
+                let new_size = sizes[i] as u32 + share;
+                if new_size >= children[i].0.max as u32 {
+                    // Pin at max.  The un-awarded portion (share − headroom)
+                    // stays in `leftover` for redistribution in the next round.
+                    let headroom = children[i].0.max as u32 - sizes[i] as u32;
+                    sizes[i] = children[i].0.max;
+                    round_assigned += headroom;
+                    any_pinned = true;
+                } else {
+                    sizes[i] = new_size as u16;
+                    round_assigned += share;
+                }
+            }
+            leftover -= round_assigned;
+
+            if !any_pinned {
+                // All proportional shares fit without pinning anyone.  Hand
+                // the integer rounding remainder to the last fills, back to
+                // front, each capped by its remaining headroom.  The remainder
+                // is at most (active_count − 1) cells, so this terminates
+                // quickly.  Also handles the all-zero-weight case, where every
+                // share is 0 and the entire leftover flows to the last fill.
+                for &i in fill_indices.iter().rev() {
+                    if leftover == 0 { break; }
+                    let headroom = children[i].0.max as u32 - sizes[i] as u32;
+                    let give = leftover.min(headroom);
+                    sizes[i] = (sizes[i] as u32 + give) as u16;
+                    leftover -= give;
+                }
+                break;
+            }
+            // At least one fill was pinned: loop to redistribute the excess
+            // among the remaining active (non-pinned) fills.
         }
     }
 
-    // Pass 4: enforce that the total does not exceed `total` (over-constrained).
-    // Trim from the end, preserving earlier children as much as possible.
+    // Pass 4: if the sum exceeds `total` (over-constrained — Fill mins alone
+    // overflow the pool), trim from the end so we never exceed the area.
+    // Later children yield space first; min is best-effort when infeasible.
     let sum: u32 = sizes.iter().map(|&s| s as u32).sum();
     if sum > total as u32 {
         let mut excess = sum - total as u32;
@@ -781,6 +872,87 @@ mod tests {
             prop_assert!(h >= n as u16,
                 "min height {h} < n={n} for vertical split");
             prop_assert!(w >= 1);
+        }
+
+        /// When combined Fill max headroom covers the pool, children sum to total;
+        /// in all cases each child's width must not exceed its max.
+        #[test]
+        fn prop_tiling_exact_when_feasible(
+            total in 0u16..=200u16,
+            cap_a in 0u16..=200u16,
+            cap_b in 0u16..=200u16,
+        ) {
+            let area = Rect::new(0, 0, total, 1);
+            let mut node = Node::Split {
+                orientation: Orientation::Horizontal,
+                children: vec![
+                    (Constraint::new(Size::Fill(1)).with_max(cap_a), Node::Tile(0)),
+                    (Constraint::new(Size::Fill(1)).with_max(cap_b), Node::Tile(1)),
+                ],
+            };
+            let tiles = solve(&mut node, area);
+            let w0 = tiles[0].1.width;
+            let w1 = tiles[1].1.width;
+            // max must always be respected.
+            prop_assert!(w0 <= cap_a, "w0={} > cap_a={}", w0, cap_a);
+            prop_assert!(w1 <= cap_b, "w1={} > cap_b={}", w1, cap_b);
+            // When combined caps can cover total, widths must sum exactly to total.
+            if (cap_a as u32) + (cap_b as u32) >= total as u32 {
+                prop_assert_eq!(w0 + w1, total,
+                    "gap: w0={} w1={} cap_a={} cap_b={} total={}", w0, w1, cap_a, cap_b, total);
+            } else {
+                // Both fills pinned at max before pool exhausted — sum ≤ total.
+                prop_assert!(w0 + w1 <= total);
+            }
+        }
+
+        /// Solving the same freshly-constructed tree twice with the same area
+        /// must produce identical results (solver is deterministic).
+        #[test]
+        fn prop_solve_is_deterministic(w in 1u16..=200u16, h in 1u16..=100u16) {
+            let area = Rect::new(0, 0, w, h);
+            let make = || Node::Split {
+                orientation: Orientation::Horizontal,
+                children: vec![
+                    (Constraint::new(Size::Fill(1)).with_max(60), Node::Tile(0)),
+                    (Constraint::new(Size::Fill(2)), Node::Tile(1)),
+                    (Constraint::new(Size::Fill(1)).with_min(5), Node::Tile(2)),
+                ],
+            };
+            let tiles1 = solve(&mut make(), area);
+            let tiles2 = solve(&mut make(), area);
+            prop_assert_eq!(tiles1, tiles2, "solve must be deterministic");
+        }
+
+        /// For arbitrary Fill constraints (including binding min/max), every
+        /// returned rect lies within the root area and widths never exceed total.
+        #[test]
+        fn prop_rects_within_area_under_clamps(
+            total in 0u16..=200u16,
+            min_a in 0u16..=50u16,
+            min_b in 0u16..=50u16,
+            extra_max in 0u16..=150u16,
+        ) {
+            let area = Rect::new(0, 0, total, 24);
+            // Ensure max >= min to avoid degenerate constraints.
+            let max_a = min_a.saturating_add(extra_max);
+            let max_b = min_b.saturating_add(extra_max);
+            let mut node = Node::Split {
+                orientation: Orientation::Horizontal,
+                children: vec![
+                    (Constraint { size: Size::Fill(1), min: min_a, max: max_a }, Node::Tile(0)),
+                    (Constraint { size: Size::Fill(1), min: min_b, max: max_b }, Node::Tile(1)),
+                ],
+            };
+            let tiles = solve(&mut node, area);
+            for (_, r) in &tiles {
+                prop_assert!(r.right() <= area.right(),
+                    "r.right={} > area.right={}", r.right(), area.right());
+                prop_assert!(r.bottom() <= area.bottom(),
+                    "r.bottom={} > area.bottom={}", r.bottom(), area.bottom());
+            }
+            let sum: u16 = tiles.iter().map(|(_, r)| r.width).sum();
+            prop_assert!(sum <= total, "sum={} > total={}", sum, total);
         }
     }
 }
