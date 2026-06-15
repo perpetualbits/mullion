@@ -29,3 +29,9 @@ Troubleshooting:
 IDENTITY CURRENTLY SET TO: github
 user.name  = Roland Nagtegaal
 user.email = perpetualbits@gmail.com
+
+License:
+  tile-engine is licensed under the GNU Lesser General Public License,
+  version 3 or later (LGPL-3.0-or-later).
+  Copyright (C) 2026  Epsilon Null Operation.
+  See COPYING (GPL-3.0) and COPYING.LESSER (LGPL-3.0 additional permissions).

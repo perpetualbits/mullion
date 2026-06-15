@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: LGPL-3.0-or-later
+// Copyright (C) 2026  Epsilon Null Operation
 //! Smoke test for tile-engine Phase 0.
 //!
 //! Enters the alternate screen, draws a few lines demonstrating wide graphemes,

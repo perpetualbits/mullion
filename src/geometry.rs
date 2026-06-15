@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: LGPL-3.0-or-later
+// Copyright (C) 2026  Epsilon Null Operation
 /// A rectangle in terminal cell coordinates.
 ///
 /// The coordinate system places the origin `(0, 0)` at the top-left corner of

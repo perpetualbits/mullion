@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: LGPL-3.0-or-later
+// Copyright (C) 2026  Epsilon Null Operation
 /// A terminal color.
 ///
 /// The sixteen named variants follow the standard ANSI 8+8 palette.  The

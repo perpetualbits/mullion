@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: LGPL-3.0-or-later
+// Copyright (C) 2026  Epsilon Null Operation
 //! Layout tree: partition a [`Rect`] into a tree of named tiles.
 //!
 //! The public API has three layers:
