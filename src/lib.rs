@@ -42,6 +42,7 @@
 //! ```
 
 pub mod backend;
+pub mod border;
 pub mod buffer;
 pub mod geometry;
 pub mod layout;
@@ -49,7 +50,9 @@ pub mod style;
 pub mod terminal;
 
 pub use backend::{Backend, CrosstermBackend, TestBackend};
+pub use border::{draw_box, frame_tiles, BorderStyle, Borders, CornerStyle, LineWeight};
 pub use buffer::{Buffer, Cell};
 pub use geometry::Rect;
+pub use layout::TileId;
 pub use style::{Color, Modifier, Style};
 pub use terminal::{poll_event, read_event, Terminal};

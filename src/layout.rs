@@ -265,9 +265,10 @@ fn solve_into(node: &mut Node, area: Rect, out: &mut Vec<(TileId, Rect)>) {
 ///      pool for subsequent rounds.
 ///    - Rounds repeat until leftover is exhausted or all fills are pinned.
 ///    - After a round that pins nothing, the integer rounding remainder is
-///      handed to the last fills backward (each capped at its `max`).
-///    - `Fill(0)` children receive only their `min`; if *all* active fills
-///      have weight 0, the remainder still goes to the last one.
+///      handed to the last fills backward in two passes: weighted fills
+///      (`weight > 0`) first, then zero-weight fills as a fallback.  This
+///      ensures `Fill(0)` children never absorb the remainder when any
+///      weighted sibling still has headroom.
 /// 4. **Over-constrained pass** — if the sum exceeds `total` (e.g. Fill mins
 ///    alone overflow the pool), children are trimmed from the end; `min` is
 ///    best-effort when the area cannot fit every minimum.
@@ -373,14 +374,27 @@ fn partition(children: &[(Constraint, Node)], total: u16) -> Vec<u16> {
             leftover -= round_assigned;
 
             if !any_pinned {
-                // All proportional shares fit without pinning anyone.  Hand
-                // the integer rounding remainder to the last fills, back to
-                // front, each capped by its remaining headroom.  The remainder
-                // is at most (active_count − 1) cells, so this terminates
-                // quickly.  Also handles the all-zero-weight case, where every
-                // share is 0 and the entire leftover flows to the last fill.
+                // All proportional shares fit without pinning anyone.  Distribute
+                // the integer rounding remainder back-to-front in two passes so
+                // that Fill(0) children (weight 0) are never preferred over
+                // siblings that carry a positive weight.
+                //
+                // Pass A: weighted fills (weight > 0), last to first.
                 for &i in fill_indices.iter().rev() {
                     if leftover == 0 { break; }
+                    let w = if let Size::Fill(w) = children[i].0.size { w } else { 0 };
+                    if w == 0 { continue; } // skip zero-weight fills in this pass
+                    let headroom = children[i].0.max as u32 - sizes[i] as u32;
+                    let give = leftover.min(headroom);
+                    sizes[i] = (sizes[i] as u32 + give) as u16;
+                    leftover -= give;
+                }
+                // Pass B: zero-weight fills (fallback for the all-zero-weight
+                // case, where every share was 0 and the full leftover remains).
+                for &i in fill_indices.iter().rev() {
+                    if leftover == 0 { break; }
+                    let w = if let Size::Fill(w) = children[i].0.size { w } else { 0 };
+                    if w > 0 { continue; } // already handled in pass A
                     let headroom = children[i].0.max as u32 - sizes[i] as u32;
                     let give = leftover.min(headroom);
                     sizes[i] = (sizes[i] as u32 + give) as u16;
