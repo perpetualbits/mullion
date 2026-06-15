@@ -1,29 +1,45 @@
 //! # tile-engine
 //!
-//! A general-purpose terminal UI tiling engine.
+//! A general-purpose, reusable terminal UI tiling engine.
 //!
-//! ## Core concepts
+//! ## Architecture
 //!
 //! ```text
-//! ┌──────────┐   draw()    ┌──────────┐   diff    ┌──────────┐
+//! ┌──────────┐  render_fn  ┌──────────┐   diff    ┌──────────┐
 //! │ Widget / │ ──────────► │  Buffer  │ ─────────► │ Terminal │ ──► Backend
 //! │ user code│             │ (back)   │            │          │
 //! └──────────┘             └──────────┘            └──────────┘
 //! ```
 //!
-//! - **[`Buffer`]** is a 2-D grid of [`Cell`]s.  Widgets write into the *back*
-//!   buffer.
-//! - **[`Terminal`]** diffs back against front, sends only the changed cells to
-//!   the [`Backend`], then swaps buffers.
-//! - **[`Backend`]** abstracts over the real terminal
-//!   ([`CrosstermBackend`]) or a headless surface ([`TestBackend`]) for tests.
+//! - **[`Buffer`]** — a 2-D grid of [`Cell`]s that widgets write into.  Every
+//!   frame the caller receives a cleared *back* buffer and fills it in.
+//! - **[`Terminal`]** — diffs the new back buffer against the previously rendered
+//!   *front* buffer, sends only the changed cells to the [`Backend`], and then
+//!   swaps the two buffers.
+//! - **[`Backend`]** — abstracts over the output target.  [`CrosstermBackend`]
+//!   drives a real terminal; [`TestBackend`] is a headless surface for tests.
 //!
 //! ## Wide-grapheme rule
 //!
 //! When a 2-column-wide grapheme (e.g. `世`, or a full-width emoji) is written
-//! at column `x`, column `x+1` becomes a **continuation cell** (empty symbol,
-//! skipped on render).  Overwriting either half of a wide pair automatically
-//! blanks its partner so no half-glyph is ever visible.
+//! at column `x`, column `x+1` becomes a **continuation cell** (empty `symbol`
+//! string, skipped by the renderer).  Overwriting either half of a wide pair
+//! automatically blanks its partner so no half-glyph is ever visible.
+//!
+//! ## Quick start
+//!
+//! ```no_run
+//! use std::io;
+//! use tile_engine::{Terminal, backend::CrosstermBackend, style::Style};
+//!
+//! let mut term = Terminal::new(CrosstermBackend::new(io::stdout()))?;
+//! term.enter()?;
+//! term.draw(|buf| {
+//!     buf.set_string(0, 0, "Hello, terminal!", Style::default());
+//! })?;
+//! term.leave()?;
+//! # Ok::<(), io::Error>(())
+//! ```
 
 pub mod backend;
 pub mod buffer;
