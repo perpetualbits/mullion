@@ -399,7 +399,9 @@ pub fn render_shared(
 /// inner deflation of `box_rect` and is recorded in `out`.  For a `Split`, the
 /// inner area is partitioned among children, a divider line is added between each
 /// consecutive pair of children, and the function recurses into each child with
-/// its own `box_rect`.
+/// its own `box_rect`.  For a `Carousel`, visible children are determined using
+/// the same viewport-intersection logic as `solve` and recorded without dividers
+/// between items (full shared-border-within-carousel styling is Phase 4b).
 ///
 /// The outer frame is *not* re-added here — it was added once by the caller.
 /// Dividers that happen to coincide with the outer frame (e.g. when a child's
@@ -487,6 +489,65 @@ fn add_dividers(
 
                 // Advance past this child's content and the following divider.
                 pos = pos.saturating_add(size).saturating_add(1);
+            }
+        }
+        Node::Carousel { orientation, scroll, children, .. } => {
+            if children.is_empty() {
+                return;
+            }
+            // Carousel items live inside the carousel's own border frame.
+            let inner = deflate(box_rect);
+            let axis = orientation.resolve(inner);
+            let main_extent = match axis {
+                Axis::Horizontal => inner.width as i32,
+                Axis::Vertical => inner.height as i32,
+            };
+
+            let total: i32 = children.iter().map(|(ext, _)| *ext as i32).sum();
+            let max_scroll = (total - main_extent).max(0) as u16;
+            *scroll = (*scroll).min(max_scroll);
+            let scroll_val = *scroll;
+
+            let vp_start = match axis {
+                Axis::Horizontal => inner.x as i32,
+                Axis::Vertical => inner.y as i32,
+            };
+            let vp_end = vp_start + main_extent;
+            let mut pos = vp_start - scroll_val as i32;
+
+            for (ext, child) in children.iter_mut() {
+                let child_start = pos;
+                let child_end = pos + *ext as i32;
+                pos = child_end;
+
+                let vis_start = child_start.max(vp_start);
+                let vis_end = child_end.min(vp_end);
+                if vis_start >= vis_end {
+                    continue; // off-screen; skip
+                }
+
+                let vis_len = (vis_end - vis_start) as u16;
+                // No dividers between carousel items.  Leaf tiles record their
+                // visible rect directly as content (no extra border deflation);
+                // nested Split/Carousel children receive the visible rect as
+                // their box_rect and handle their own internal borders.
+                let child_box = match axis {
+                    Axis::Horizontal => Rect::new(
+                        vis_start as u16, inner.y, vis_len, inner.height,
+                    ),
+                    Axis::Vertical => Rect::new(
+                        inner.x, vis_start as u16, inner.width, vis_len,
+                    ),
+                };
+                match child {
+                    Node::Tile(id) => {
+                        // Content rect = visible rect; carousel items share no inner border.
+                        out.push((*id, child_box, child_box));
+                    }
+                    _ => {
+                        add_dividers(grid, child, child_box, weight, out);
+                    }
+                }
             }
         }
     }

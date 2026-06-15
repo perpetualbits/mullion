@@ -166,6 +166,9 @@ pub type TileId = u64;
 /// A `Tile` is a leaf that maps to a rectangular area in the output.
 /// A `Split` subdivides its assigned area among child nodes according to
 /// their [`Constraint`]s and the split [`Orientation`].
+/// A `Carousel` is a scrollable strip: children extend beyond the viewport
+/// along the main axis and are virtualized — only those that intersect the
+/// viewport produce rects.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Node {
     /// A leaf tile with a caller-assigned identifier.
@@ -180,19 +183,48 @@ pub enum Node {
         /// any rounding remainder to guarantee the areas tile exactly.
         children: Vec<(Constraint, Node)>,
     },
+    /// A scrollable strip whose children may extend beyond the viewport along
+    /// the main axis.
+    ///
+    /// Children have a fixed **main-axis extent** (cells); the cross axis
+    /// fills the full available space.  `scroll` is the offset in cells from
+    /// the start of the child list.  Has its own `id` so it can be addressed
+    /// (scrolled, reconciled) via [`node_by_id`](crate::tree::node_by_id)
+    /// without being a focusable leaf.
+    ///
+    /// Only the children whose extents intersect the viewport produce rects
+    /// (virtualization); off-screen children cost nothing at solve-time.
+    /// Partial tiles at either edge are clipped to the viewport boundary.
+    Carousel {
+        /// Caller-assigned identifier for this container.  Not a focusable
+        /// leaf — addressed through `node_by_id`, not via `Tree::focus`.
+        id: TileId,
+        /// Scroll direction.  `Horizontal` scrolls left/right; `Vertical`
+        /// scrolls up/down.  `Adaptive` is resolved at solve-time using the
+        /// same hysteresis logic as [`Node::Split`].
+        orientation: Orientation,
+        /// Offset in cells from the first child.  Clamped in place by `solve`
+        /// so the last child's tail is always flush with the viewport end —
+        /// no blank gap past the content.
+        scroll: u16,
+        /// Ordered list of `(main_axis_extent, child)` pairs.  Each extent is
+        /// the number of cells the child occupies along the main axis before
+        /// viewport clipping.
+        children: Vec<(u16, Node)>,
+    },
 }
 
 // ── Solver ───────────────────────────────────────────────────────────────────
 
 /// Solve the layout tree rooted at `node` within `area`.
 ///
-/// Returns a flat list of `(TileId, Rect)` pairs — one entry per leaf tile —
-/// in depth-first, left-to-right order.
+/// Returns a flat list of `(TileId, Rect)` pairs — one entry per **visible**
+/// leaf tile — in depth-first, left-to-right order.
 ///
 /// The solver guarantees:
 /// - Every returned `Rect` is contained within `area` (or its recursive
-///   sub-area for nested splits).
-/// - The children of a split exactly tile their assigned area when at least
+///   sub-area for nested splits/carousels).
+/// - The children of a `Split` exactly tile their assigned area when at least
 ///   one `Fill` child has enough `max` headroom to absorb the leftover pool.
 ///   If every `Fill` at a level is pinned at its `max` before the pool is
 ///   exhausted, the residual is left unassigned — `max` wins over exact tiling
@@ -203,9 +235,14 @@ pub enum Node {
 /// - If space runs out, remaining children receive zero-sized rects; no panic
 ///   occurs.  `min` is best-effort when the area cannot fit every child's
 ///   minimum.
+/// - For a `Carousel`, `scroll` is clamped in place so that the last child's
+///   tail is always flush with the viewport end (no blank gap past the content).
+///   Only children that intersect the viewport produce rects; partial tiles at
+///   either edge are clipped to the viewport boundary.
 ///
 /// `node` is taken as `&mut` so that `Orientation::Adaptive` can store the
-/// chosen axis in `last` for hysteresis on subsequent solves.
+/// chosen axis in `last` for hysteresis on subsequent solves, and so that
+/// `Carousel::scroll` can be clamped in place.
 pub fn solve(node: &mut Node, area: Rect) -> Vec<(TileId, Rect)> {
     let mut out = Vec::new();
     solve_into(node, area, &mut out);
@@ -213,6 +250,10 @@ pub fn solve(node: &mut Node, area: Rect) -> Vec<(TileId, Rect)> {
 }
 
 /// Recursive helper that appends `(TileId, Rect)` pairs to `out`.
+///
+/// For `Split`, partitions the area and recurses into every child.
+/// For `Carousel`, only the children that intersect the current viewport
+/// produce rects; `scroll` is clamped in place before the pass.
 fn solve_into(node: &mut Node, area: Rect, out: &mut Vec<(TileId, Rect)>) {
     match node {
         Node::Tile(id) => {
@@ -245,6 +286,56 @@ fn solve_into(node: &mut Node, area: Rect, out: &mut Vec<(TileId, Rect)>) {
                 };
                 solve_into(child, child_area, out);
                 pos = pos.saturating_add(*size);
+            }
+        }
+        Node::Carousel { orientation, scroll, children, .. } => {
+            if children.is_empty() {
+                return;
+            }
+            let axis = orientation.resolve(area);
+            let main_extent = match axis {
+                Axis::Horizontal => area.width as i32,
+                Axis::Vertical => area.height as i32,
+            };
+
+            // Total content length along the main axis.
+            let total: i32 = children.iter().map(|(ext, _)| *ext as i32).sum();
+
+            // Clamp scroll so the content tail is always flush with the viewport end.
+            // Saturating_sub via the i32 max(0) handles total < main_extent gracefully.
+            let max_scroll = (total - main_extent).max(0) as u16;
+            *scroll = (*scroll).min(max_scroll);
+            let scroll_val = *scroll; // snapshot after clamping to avoid re-borrow
+
+            // Viewport: [vp_start, vp_end) in screen coordinates.
+            let vp_start = match axis {
+                Axis::Horizontal => area.x as i32,
+                Axis::Vertical => area.y as i32,
+            };
+            let vp_end = vp_start + main_extent;
+
+            // First child's screen origin; negative when scroll > 0 (content starts before the viewport).
+            let mut pos = vp_start - scroll_val as i32;
+
+            for (ext, child) in children.iter_mut() {
+                let child_start = pos;
+                let child_end = pos + *ext as i32;
+                pos = child_end; // advance before any `continue` so position is always updated
+
+                // Intersect child span with viewport; skip entirely if no overlap (virtualization).
+                let vis_start = child_start.max(vp_start);
+                let vis_end = child_end.min(vp_end);
+                if vis_start >= vis_end {
+                    continue;
+                }
+
+                // vis_start >= vp_start >= 0, so the cast to u16 is safe.
+                let vis_len = (vis_end - vis_start) as u16;
+                let child_area = match axis {
+                    Axis::Horizontal => Rect::new(vis_start as u16, area.y, vis_len, area.height),
+                    Axis::Vertical => Rect::new(area.x, vis_start as u16, area.width, vis_len),
+                };
+                solve_into(child, child_area, out);
             }
         }
     }
@@ -443,8 +534,11 @@ fn clamp(v: u16, lo: u16, hi: u16) -> u16 {
 ///   minimum widths, height is the *max* of children's minimum heights.
 /// - `Split` along the vertical axis → height is the *sum* of children's
 ///   minimum heights, width is the *max* of children's minimum widths.
-/// - `Adaptive` → the max of both orientations' minima (because we do not
-///   know which axis will be chosen at solve-time).
+/// - `Split Adaptive` → the max of both orientations' minima (because we do
+///   not know which axis will be chosen at solve-time).
+/// - `Carousel` → main axis is `0` (it scrolls, so zero cells is valid);
+///   cross axis is the *max* of children's cross-axis minimums.  `Adaptive`
+///   carousels take the conservative maximum of both orientations' minimums.
 ///
 /// The returned values saturate at `u16::MAX`.
 pub fn min_size(node: &Node) -> (u16, u16) {
@@ -466,6 +560,36 @@ pub fn min_size(node: &Node) -> (u16, u16) {
                     let (wh, hh) = min_size_along(children, Axis::Horizontal);
                     let (wv, hv) = min_size_along(children, Axis::Vertical);
                     (wh.max(wv), hh.max(hv))
+                }
+            }
+        }
+        Node::Carousel { orientation, children, .. } => {
+            if children.is_empty() {
+                return (0, 0);
+            }
+            match orientation {
+                // main = 0 (scrolls); cross = max child cross-min.
+                Orientation::Horizontal => {
+                    let cross = children.iter()
+                        .map(|(_, c)| min_size(c).1)
+                        .fold(0u16, u16::max);
+                    (0, cross)
+                }
+                Orientation::Vertical => {
+                    let cross = children.iter()
+                        .map(|(_, c)| min_size(c).0)
+                        .fold(0u16, u16::max);
+                    (cross, 0)
+                }
+                Orientation::Adaptive { .. } => {
+                    // Conservative: could run either axis, so bound both.
+                    let w = children.iter()
+                        .map(|(_, c)| min_size(c).0)
+                        .fold(0u16, u16::max);
+                    let h = children.iter()
+                        .map(|(_, c)| min_size(c).1)
+                        .fold(0u16, u16::max);
+                    (w, h)
                 }
             }
         }
@@ -728,6 +852,177 @@ mod tests {
         }
     }
 
+    // ── Carousel tests ────────────────────────────────────────────────────
+
+    fn carousel_10x3(scroll: u16) -> Node {
+        Node::Carousel {
+            id: 99,
+            orientation: Orientation::Horizontal,
+            scroll,
+            children: (0u64..10).map(|i| (3u16, Node::Tile(i))).collect(),
+        }
+    }
+
+    #[test]
+    fn carousel_virtualization_only_visible_tiles() {
+        // 10 tiles × 3 cells each = 30 total; viewport = 10 cells.
+        // At scroll=0: tiles 0,1,2 fully in [0,10); tile 3 clips at [9,10).
+        let area = Rect::new(0, 0, 10, 5);
+        let tiles = solve(&mut carousel_10x3(0), area);
+        assert_eq!(tiles.len(), 4, "only 4 tiles intersect [0,10)");
+        assert_eq!(tiles[0], (0, Rect::new(0, 0, 3, 5)));
+        assert_eq!(tiles[1], (1, Rect::new(3, 0, 3, 5)));
+        assert_eq!(tiles[2], (2, Rect::new(6, 0, 3, 5)));
+        // Tile 3 occupies [9,12) but only [9,10) is visible → clipped to 1 cell.
+        assert_eq!(tiles[3], (3, Rect::new(9, 0, 1, 5)));
+    }
+
+    #[test]
+    fn carousel_clipped_tile_at_edge() {
+        let area = Rect::new(0, 0, 10, 5);
+        let tiles = solve(&mut carousel_10x3(0), area);
+        // The straddling tile at the right edge is 1 cell wide (10-9=1).
+        let edge = tiles.last().unwrap();
+        assert_eq!(edge.1.width, 1);
+        assert_eq!(edge.1.right(), area.right());
+    }
+
+    #[test]
+    fn carousel_visible_rects_contiguous_and_in_order() {
+        let area = Rect::new(0, 0, 10, 5);
+        let tiles = solve(&mut carousel_10x3(0), area);
+        for w in tiles.windows(2) {
+            assert_eq!(w[0].1.right(), w[1].1.x, "rects must be contiguous");
+        }
+        // All rects within the viewport.
+        for (_, r) in &tiles {
+            assert!(r.x >= area.x && r.right() <= area.right());
+        }
+    }
+
+    #[test]
+    fn carousel_scroll_shows_later_tiles() {
+        // scroll=6: first child screen pos = 0-6=-6
+        // tiles 0→[-6,-3), 1→[-3,0) both invisible.
+        // tile 2→[0,3), 3→[3,6), 4→[6,9) fully visible; tile 5→[9,12) clipped.
+        let area = Rect::new(0, 0, 10, 5);
+        let tiles = solve(&mut carousel_10x3(6), area);
+        assert_eq!(tiles.len(), 4);
+        assert_eq!(tiles[0].0, 2);
+        assert_eq!(tiles[1].0, 3);
+        assert_eq!(tiles[2].0, 4);
+        assert_eq!(tiles[3].0, 5);
+    }
+
+    #[test]
+    fn carousel_scroll_clamped_to_max() {
+        // total=30, viewport=10, max_scroll=20.  scroll=9999 → clamped to 20.
+        let area = Rect::new(0, 0, 10, 5);
+        let mut node = carousel_10x3(9999);
+        let tiles = solve(&mut node, area);
+        if let Node::Carousel { scroll, .. } = &node {
+            assert_eq!(*scroll, 20, "scroll must be clamped to max_scroll=20");
+        }
+        // The last visible tile must end exactly at the viewport's right edge.
+        let last_right = tiles.last().unwrap().1.right();
+        assert_eq!(last_right, area.right(), "content must be flush at the end");
+    }
+
+    #[test]
+    fn carousel_vertical_scroll() {
+        // Vertical carousel: 5 tiles × 4 rows each; viewport height=10.
+        let area = Rect::new(0, 0, 20, 10);
+        let mut node = Node::Carousel {
+            id: 0,
+            orientation: Orientation::Vertical,
+            scroll: 4,
+            children: (0u64..5).map(|i| (4u16, Node::Tile(i))).collect(),
+        };
+        let tiles = solve(&mut node, area);
+        // scroll=4: tile 0→[-4,0) invisible; tile 1→[0,4); tile 2→[4,8); tile 3→[8,12) clips.
+        assert_eq!(tiles[0].0, 1);
+        assert_eq!(tiles[0].1, Rect::new(0, 0, 20, 4));
+        // tile 3 clips to [8,10) → height=2
+        assert_eq!(tiles.last().unwrap().0, 3);
+        assert_eq!(tiles.last().unwrap().1.height, 2);
+    }
+
+    #[test]
+    fn carousel_adaptive_horizontal_for_wide() {
+        let area = Rect::new(0, 0, 100, 10);
+        let mut node = Node::Carousel {
+            id: 0,
+            orientation: Orientation::Adaptive { margin_pct: 0, last: None },
+            scroll: 0,
+            children: vec![(50u16, Node::Tile(0)), (50u16, Node::Tile(1))],
+        };
+        let tiles = solve(&mut node, area);
+        // Wide area → Horizontal → tiles side by side (same y and height).
+        assert_eq!(tiles.len(), 2);
+        assert_eq!(tiles[0].1.y, tiles[1].1.y);
+        assert_eq!(tiles[0].1.height, tiles[1].1.height);
+    }
+
+    #[test]
+    fn carousel_adaptive_vertical_for_tall() {
+        let area = Rect::new(0, 0, 10, 100);
+        let mut node = Node::Carousel {
+            id: 0,
+            orientation: Orientation::Adaptive { margin_pct: 0, last: None },
+            scroll: 0,
+            children: vec![(50u16, Node::Tile(0)), (50u16, Node::Tile(1))],
+        };
+        let tiles = solve(&mut node, area);
+        // Tall area → Vertical → tiles stacked (same x and width).
+        assert_eq!(tiles.len(), 2);
+        assert_eq!(tiles[0].1.x, tiles[1].1.x);
+        assert_eq!(tiles[0].1.width, tiles[1].1.width);
+    }
+
+    #[test]
+    fn carousel_min_size_horizontal() {
+        let node = Node::Carousel {
+            id: 0,
+            orientation: Orientation::Horizontal,
+            scroll: 0,
+            // Children with min heights of 3 and 5.
+            children: vec![
+                (10, Node::Tile(0)), // min_size=(1,1)
+                (10, Node::Split {
+                    orientation: Orientation::Vertical,
+                    children: vec![
+                        (Constraint::new(Size::Fill(1)), Node::Tile(1)),
+                        (Constraint::new(Size::Fill(1)), Node::Tile(2)),
+                        (Constraint::new(Size::Fill(1)), Node::Tile(3)),
+                    ],
+                }),
+            ],
+        };
+        // Horizontal carousel: main=0, cross(height)=max(1,3)=3.
+        assert_eq!(min_size(&node), (0, 3));
+    }
+
+    #[test]
+    fn carousel_min_size_vertical() {
+        let node = Node::Carousel {
+            id: 0,
+            orientation: Orientation::Vertical,
+            scroll: 0,
+            children: vec![
+                (10, Node::Tile(0)),
+                (10, Node::Split {
+                    orientation: Orientation::Horizontal,
+                    children: vec![
+                        (Constraint::new(Size::Fill(1)), Node::Tile(1)),
+                        (Constraint::new(Size::Fill(1)), Node::Tile(2)),
+                    ],
+                }),
+            ],
+        };
+        // Vertical carousel: main=0, cross(width)=max(1,2)=2.
+        assert_eq!(min_size(&node), (2, 0));
+    }
+
     // ── Property tests ────────────────────────────────────────────────────
 
     use proptest::prelude::*;
@@ -919,6 +1214,39 @@ mod tests {
             } else {
                 // Both fills pinned at max before pool exhausted — sum ≤ total.
                 prop_assert!(w0 + w1 <= total);
+            }
+        }
+
+        /// A Carousel's visible rects are in ascending order, non-overlapping,
+        /// and fully contained within the viewport; off-screen children never appear.
+        #[test]
+        fn prop_carousel_visible_rects_invariants(
+            scroll in 0u16..=100u16,
+            viewport in 1u16..=50u16,
+            num_children in 0usize..=15usize,
+        ) {
+            let area = Rect::new(0, 0, viewport, 5);
+            let mut node = Node::Carousel {
+                id: 0,
+                orientation: Orientation::Horizontal,
+                scroll,
+                children: (0..num_children as u64)
+                    .map(|i| (4u16, Node::Tile(i)))
+                    .collect(),
+            };
+            let tiles = solve(&mut node, area);
+
+            for (_, r) in &tiles {
+                prop_assert!(r.x >= area.x,
+                    "rect.x={} < area.x={}", r.x, area.x);
+                prop_assert!(r.right() <= area.right(),
+                    "rect.right={} > area.right={}", r.right(), area.right());
+            }
+            // Adjacent rects must be strictly ordered and non-overlapping.
+            for w in tiles.windows(2) {
+                prop_assert!(w[0].0 < w[1].0, "tile ids out of child order");
+                prop_assert!(w[0].1.right() <= w[1].1.x,
+                    "rects overlap: {:?} and {:?}", w[0].1, w[1].1);
             }
         }
 

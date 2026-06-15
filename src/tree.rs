@@ -19,11 +19,15 @@ use crate::layout::{Axis, Node, Orientation, TileId};
 
 // ── Free functions ────────────────────────────────────────────────────────────
 
-/// The `TileId` of a leaf node, or `None` for a `Split`.
+/// The `TileId` of a leaf node, or `None` for a container (`Split` or `Carousel`).
+///
+/// A `Carousel`'s own `id` field is not a focusable leaf id — address it via
+/// [`node_by_id`] instead.
 pub fn tile_id_of(node: &Node) -> Option<TileId> {
     match node {
         Node::Tile(id) => Some(*id),
         Node::Split { .. } => None,
+        Node::Carousel { .. } => None, // container, not a focusable leaf
     }
 }
 
@@ -42,6 +46,12 @@ fn collect_leaves(node: &Node, out: &mut Vec<TileId>) {
     match node {
         Node::Tile(id) => out.push(*id),
         Node::Split { children, .. } => {
+            for (_, child) in children {
+                collect_leaves(child, out);
+            }
+        }
+        // All carousel children are logical leaves regardless of scroll position.
+        Node::Carousel { children, .. } => {
             for (_, child) in children {
                 collect_leaves(child, out);
             }
@@ -74,6 +84,84 @@ fn find_path(node: &Node, id: TileId, path: &mut Vec<usize>) -> bool {
             }
             false
         }
+        // Carousel children are logical leaves; search all of them regardless of scroll.
+        Node::Carousel { children, .. } => {
+            for (i, (_, child)) in children.iter().enumerate() {
+                path.push(i);
+                if find_path(child, id, path) {
+                    return true;
+                }
+                path.pop();
+            }
+            false
+        }
+    }
+}
+
+// ── node_by_id ────────────────────────────────────────────────────────────────
+
+/// Find a node by id — matches a `Tile(id)` **or** a `Carousel { id, .. }`.
+///
+/// Performs a depth-first pre-order search through the entire tree.  Returns a
+/// shared reference to the first matching node, or `None` if `id` is not present.
+///
+/// Enables addressing a carousel to read its scroll offset or children without
+/// it being a focusable leaf (Phase 4b will expose mutable scrolling).
+pub fn node_by_id(root: &Node, id: TileId) -> Option<&Node> {
+    match root {
+        Node::Tile(tid) => {
+            if *tid == id { Some(root) } else { None }
+        }
+        Node::Split { children, .. } => {
+            children.iter().find_map(|(_, child)| node_by_id(child, id))
+        }
+        Node::Carousel { id: cid, children, .. } => {
+            if *cid == id {
+                return Some(root);
+            }
+            children.iter().find_map(|(_, child)| node_by_id(child, id))
+        }
+    }
+}
+
+/// Find a node by id — matches a `Tile(id)` **or** a `Carousel { id, .. }`.
+///
+/// Mutable variant of [`node_by_id`].  Returns a mutable reference to the
+/// first matching node, enabling callers to update fields such as
+/// `Carousel::scroll` (Phase 4b).
+///
+/// The implementation performs two sequential match passes on `root` to avoid
+/// borrow-checker conflicts: a shared borrow to identify the target, then a
+/// mutable borrow to return it or recurse.
+pub fn node_by_id_mut(root: &mut Node, id: TileId) -> Option<&mut Node> {
+    // Phase 1: check if this node itself is the target via a shared borrow.
+    let is_target = match &*root {
+        Node::Tile(tid) => *tid == id,
+        Node::Carousel { id: cid, .. } => *cid == id,
+        Node::Split { .. } => false,
+    };
+    if is_target {
+        return Some(root);
+    }
+    // Phase 2: recurse into children with a mutable borrow.
+    match root {
+        Node::Tile(_) => None,
+        Node::Split { children, .. } => {
+            for (_, child) in children.iter_mut() {
+                if let Some(found) = node_by_id_mut(child, id) {
+                    return Some(found);
+                }
+            }
+            None
+        }
+        Node::Carousel { children, .. } => {
+            for (_, child) in children.iter_mut() {
+                if let Some(found) = node_by_id_mut(child, id) {
+                    return Some(found);
+                }
+            }
+            None
+        }
     }
 }
 
@@ -92,11 +180,17 @@ pub enum Dir {
 
 /// Navigate `root` by following `path` (each element is a `children` index) and
 /// return a mutable reference to the node at that position.
+///
+/// Works for both `Split` and `Carousel` nodes; the child tuple layout differs
+/// (`(Constraint, Node)` vs `(u16, Node)`) but the child node is always `.1`.
 fn node_at_path_mut<'a>(root: &'a mut Node, path: &[usize]) -> Option<&'a mut Node> {
     let mut cur = root;
     for &idx in path {
         match cur {
             Node::Split { children, .. } if idx < children.len() => {
+                cur = &mut children[idx].1;
+            }
+            Node::Carousel { children, .. } if idx < children.len() => {
                 cur = &mut children[idx].1;
             }
             _ => return None,
@@ -322,6 +416,15 @@ mod tests {
         h_split(vec![tile(0), v_split(vec![tile(1), tile(2)]), tile(3)])
     }
 
+    fn carousel(id: TileId, kids: Vec<Node>) -> Node {
+        Node::Carousel {
+            id,
+            orientation: Orientation::Horizontal,
+            scroll: 0,
+            children: kids.into_iter().map(|n| (10u16, n)).collect(),
+        }
+    }
+
     // ── tile_id_of ────────────────────────────────────────────────────────
 
     #[test]
@@ -332,6 +435,73 @@ mod tests {
     #[test]
     fn tile_id_of_split_is_none() {
         assert_eq!(tile_id_of(&h_split(vec![])), None);
+    }
+
+    #[test]
+    fn tile_id_of_carousel_is_none() {
+        // Carousel has its own id but is a container, not a focusable leaf.
+        assert_eq!(tile_id_of(&carousel(42, vec![])), None);
+    }
+
+    // ── Carousel leaves ───────────────────────────────────────────────────
+
+    #[test]
+    fn carousel_leaves_includes_all_children() {
+        // All 5 tiles are logical leaves regardless of which would be on-screen.
+        let node = carousel(99, (0u64..5).map(Node::Tile).collect());
+        assert_eq!(leaves(&node), vec![0, 1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn carousel_leaves_nested_in_split() {
+        // H-split[Tile(0), Carousel(id=99)[Tile(1), Tile(2)]]
+        let root = h_split(vec![tile(0), carousel(99, vec![tile(1), tile(2)])]);
+        assert_eq!(leaves(&root), vec![0, 1, 2]);
+    }
+
+    // ── node_by_id ────────────────────────────────────────────────────────
+
+    #[test]
+    fn node_by_id_finds_carousel_by_its_own_id() {
+        let root = carousel(10, vec![tile(1), tile(2)]);
+        let found = node_by_id(&root, 10).unwrap();
+        assert!(matches!(found, Node::Carousel { id: 10, .. }));
+    }
+
+    #[test]
+    fn node_by_id_finds_tile_inside_carousel() {
+        let root = carousel(10, vec![tile(1), tile(2)]);
+        assert!(matches!(node_by_id(&root, 1).unwrap(), Node::Tile(1)));
+        assert!(matches!(node_by_id(&root, 2).unwrap(), Node::Tile(2)));
+    }
+
+    #[test]
+    fn node_by_id_returns_none_for_missing() {
+        let root = carousel(10, vec![tile(1)]);
+        assert!(node_by_id(&root, 999).is_none());
+    }
+
+    #[test]
+    fn node_by_id_finds_tile_in_split() {
+        let root = h_split(vec![tile(5), tile(6)]);
+        assert!(matches!(node_by_id(&root, 5).unwrap(), Node::Tile(5)));
+        assert!(matches!(node_by_id(&root, 6).unwrap(), Node::Tile(6)));
+        assert!(node_by_id(&root, 99).is_none());
+    }
+
+    #[test]
+    fn node_by_id_mut_modifies_carousel_scroll() {
+        let mut root = carousel(10, vec![tile(1)]);
+        if let Some(Node::Carousel { scroll, .. }) = node_by_id_mut(&mut root, 10) {
+            *scroll = 42;
+        }
+        assert!(matches!(&root, Node::Carousel { scroll: 42, .. }));
+    }
+
+    #[test]
+    fn node_by_id_mut_returns_none_for_missing() {
+        let mut root = carousel(10, vec![tile(1)]);
+        assert!(node_by_id_mut(&mut root, 999).is_none());
     }
 
     // ── leaves ────────────────────────────────────────────────────────────
@@ -645,6 +815,8 @@ mod tests {
                 match n {
                     Node::Tile(_) => 1,
                     Node::Split { children, .. } =>
+                        children.iter().map(|(_, c)| tile_count(c)).sum(),
+                    Node::Carousel { children, .. } =>
                         children.iter().map(|(_, c)| tile_count(c)).sum(),
                 }
             }
