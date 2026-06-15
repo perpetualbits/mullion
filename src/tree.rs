@@ -11,10 +11,11 @@
 //! Leaf tiles are enumerated in **depth-first pre-order**, children visited in
 //! declaration order.  This is the linear `Tab` / `Shift-Tab` traversal order.
 //! Geometric/directional focus (`hjkl`) requires solved rects and is deferred
-//! to Phase 3b.
+//! to a later phase; this module is restricted to id-based traversal and
+//! structural edits (`flip`, `swap`).
 
 use crate::border::LineWeight;
-use crate::layout::{Node, TileId};
+use crate::layout::{Axis, Node, Orientation, TileId};
 
 // ── Free functions ────────────────────────────────────────────────────────────
 
@@ -74,6 +75,34 @@ fn find_path(node: &Node, id: TileId, path: &mut Vec<usize>) -> bool {
             false
         }
     }
+}
+
+// ── Dir ───────────────────────────────────────────────────────────────────────
+
+/// Direction for a sibling swap within a [`Split`](Node::Split).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Dir {
+    /// Swap with the next sibling (higher index, later in DFS order).
+    Next,
+    /// Swap with the previous sibling (lower index, earlier in DFS order).
+    Prev,
+}
+
+// ── Tree helpers ──────────────────────────────────────────────────────────────
+
+/// Navigate `root` by following `path` (each element is a `children` index) and
+/// return a mutable reference to the node at that position.
+fn node_at_path_mut<'a>(root: &'a mut Node, path: &[usize]) -> Option<&'a mut Node> {
+    let mut cur = root;
+    for &idx in path {
+        match cur {
+            Node::Split { children, .. } if idx < children.len() => {
+                cur = &mut children[idx].1;
+            }
+            _ => return None,
+        }
+    }
+    Some(cur)
 }
 
 // ── Tree ──────────────────────────────────────────────────────────────────────
@@ -182,6 +211,67 @@ impl Tree {
         match self.focus {
             Some(id) if ls.contains(&id) => {}
             _ => self.focus = ls.into_iter().next(),
+        }
+    }
+
+    /// Flip the orientation of the [`Split`](Node::Split) that is the focused
+    /// leaf's parent.
+    ///
+    /// Always produces an explicit `Horizontal` or `Vertical` (disabling any
+    /// `Adaptive` variant).  For an `Adaptive` parent, "current" is its
+    /// `last`-resolved axis, defaulting to `Horizontal` when no solve has run
+    /// yet.  The new orientation is the opposite of that effective axis.
+    ///
+    /// No-op if there is no focus or the focused leaf is the root (no parent).
+    pub fn flip_focused_parent(&mut self) {
+        let id = match self.focus { Some(id) => id, None => return };
+        let path = match focus_path(&self.root, id) {
+            Some(p) if !p.is_empty() => p,
+            _ => return,
+        };
+        // `path` is an owned Vec; the immutable borrow of self.root is released.
+        let parent = match node_at_path_mut(&mut self.root, &path[..path.len() - 1]) {
+            Some(n) => n,
+            None => return,
+        };
+        if let Node::Split { orientation, .. } = parent {
+            *orientation = match orientation {
+                Orientation::Horizontal => Orientation::Vertical,
+                Orientation::Vertical => Orientation::Horizontal,
+                Orientation::Adaptive { last, .. } => match last {
+                    Some(Axis::Vertical) => Orientation::Horizontal,
+                    _ => Orientation::Vertical,
+                },
+            };
+        }
+    }
+
+    /// Swap the focused leaf with its next or previous sibling.
+    ///
+    /// Focus stays on the same [`TileId`] — the tile moves, the id does not
+    /// change.  No-op at the boundary (no sibling in that direction), if the
+    /// focused leaf is the root, or if there is no focus.
+    pub fn swap_focused(&mut self, dir: Dir) {
+        let id = match self.focus { Some(id) => id, None => return };
+        let path = match focus_path(&self.root, id) {
+            Some(p) if !p.is_empty() => p,
+            _ => return,
+        };
+        let child_idx = path[path.len() - 1];
+        let parent = match node_at_path_mut(&mut self.root, &path[..path.len() - 1]) {
+            Some(n) => n,
+            None => return,
+        };
+        if let Node::Split { children, .. } = parent {
+            match dir {
+                Dir::Next if child_idx + 1 < children.len() => {
+                    children.swap(child_idx, child_idx + 1);
+                }
+                Dir::Prev if child_idx > 0 => {
+                    children.swap(child_idx - 1, child_idx);
+                }
+                _ => {}
+            }
         }
     }
 }
@@ -428,6 +518,125 @@ mod tests {
         )
     }
 
+    // ── flip_focused_parent ───────────────────────────────────────────────
+
+    #[test]
+    fn flip_h_to_v() {
+        let mut tree = Tree::new(h_split(vec![tile(0), tile(1)]));
+        tree.flip_focused_parent();
+        assert!(matches!(tree.root(), Node::Split { orientation: Orientation::Vertical, .. }));
+    }
+
+    #[test]
+    fn flip_v_to_h() {
+        let mut tree = Tree::new(v_split(vec![tile(0), tile(1)]));
+        tree.flip_focused_parent();
+        assert!(matches!(tree.root(), Node::Split { orientation: Orientation::Horizontal, .. }));
+    }
+
+    #[test]
+    fn flip_twice_roundtrips() {
+        let mut tree = Tree::new(h_split(vec![tile(0), tile(1)]));
+        tree.flip_focused_parent();
+        tree.flip_focused_parent();
+        assert!(matches!(tree.root(), Node::Split { orientation: Orientation::Horizontal, .. }));
+    }
+
+    #[test]
+    fn flip_adaptive_none_last_becomes_vertical() {
+        let root = Node::Split {
+            orientation: Orientation::Adaptive { margin_pct: 10, last: None },
+            children: vec![
+                (Constraint::new(Size::Fill(1)), tile(0)),
+                (Constraint::new(Size::Fill(1)), tile(1)),
+            ],
+        };
+        let mut tree = Tree::new(root);
+        tree.flip_focused_parent();
+        // None defaults to Horizontal → flip produces Vertical
+        assert!(matches!(tree.root(), Node::Split { orientation: Orientation::Vertical, .. }));
+    }
+
+    #[test]
+    fn flip_adaptive_last_vertical_becomes_horizontal() {
+        let root = Node::Split {
+            orientation: Orientation::Adaptive { margin_pct: 10, last: Some(Axis::Vertical) },
+            children: vec![
+                (Constraint::new(Size::Fill(1)), tile(0)),
+                (Constraint::new(Size::Fill(1)), tile(1)),
+            ],
+        };
+        let mut tree = Tree::new(root);
+        tree.flip_focused_parent();
+        assert!(matches!(tree.root(), Node::Split { orientation: Orientation::Horizontal, .. }));
+    }
+
+    #[test]
+    fn flip_noop_at_root_tile() {
+        let mut tree = Tree::new(tile(42));
+        tree.flip_focused_parent(); // no parent → no-op
+        assert_eq!(tree.focus(), Some(42));
+    }
+
+    #[test]
+    fn flip_inner_parent_not_outer() {
+        // H-split[Tile(0), V-split[Tile(1), Tile(2)], Tile(3)], focus=1
+        let mut tree = Tree::new(sample_tree());
+        tree.focus_set(1);
+        tree.flip_focused_parent(); // flips the V-split parent of tile(1)
+        // Root is still H-split; inner parent of tile(1) is now H-split
+        assert!(matches!(tree.root(), Node::Split { orientation: Orientation::Horizontal, .. }));
+        if let Node::Split { children, .. } = tree.root() {
+            // child at idx 1 is the former V-split, now H-split
+            assert!(matches!(&children[1].1, Node::Split { orientation: Orientation::Horizontal, .. }));
+        }
+    }
+
+    // ── swap_focused ──────────────────────────────────────────────────────
+
+    #[test]
+    fn swap_next_moves_focused_right() {
+        let mut tree = Tree::new(h_split(vec![tile(0), tile(1), tile(2)]));
+        // focus=0 at idx=0
+        tree.swap_focused(Dir::Next);
+        assert_eq!(leaves(tree.root()), vec![1, 0, 2]);
+        assert_eq!(tree.focus(), Some(0));
+    }
+
+    #[test]
+    fn swap_prev_moves_focused_left() {
+        let mut tree = Tree::new(h_split(vec![tile(0), tile(1), tile(2)]));
+        tree.focus_set(1); // idx=1
+        tree.swap_focused(Dir::Prev);
+        assert_eq!(leaves(tree.root()), vec![1, 0, 2]);
+        assert_eq!(tree.focus(), Some(1));
+    }
+
+    #[test]
+    fn swap_next_noop_at_last() {
+        let mut tree = Tree::new(h_split(vec![tile(0), tile(1), tile(2)]));
+        tree.focus_set(2);
+        let before = leaves(tree.root());
+        tree.swap_focused(Dir::Next);
+        assert_eq!(leaves(tree.root()), before);
+    }
+
+    #[test]
+    fn swap_prev_noop_at_first() {
+        let mut tree = Tree::new(h_split(vec![tile(0), tile(1), tile(2)]));
+        // focus=0 at idx=0; no previous sibling
+        let before = leaves(tree.root());
+        tree.swap_focused(Dir::Prev);
+        assert_eq!(leaves(tree.root()), before);
+    }
+
+    #[test]
+    fn swap_noop_at_root_tile() {
+        let mut tree = Tree::new(tile(42));
+        tree.swap_focused(Dir::Next);
+        assert_eq!(tree.focus(), Some(42));
+    }
+
     proptest! {
         /// `leaves(root).len()` equals the number of `Tile` nodes in the tree.
         #[test]
@@ -504,6 +713,33 @@ mod tests {
                 "focus should remain on {} after sibling change",
                 focused_id,
             );
+        }
+
+        /// `swap_focused(Next)` followed by `swap_focused(Prev)` restores the
+        /// original child order when `swap_next` was not a no-op (i.e. the
+        /// focused leaf was not already at the last sibling position).
+        #[test]
+        fn prop_swap_roundtrip(root in arb_node()) {
+            let ls = leaves(&root);
+            prop_assume!(ls.len() >= 2);
+            let unique: std::collections::HashSet<TileId> = ls.iter().copied().collect();
+            prop_assume!(unique.len() == ls.len());
+
+            let mut tree = Tree::new(root);
+            let focused_id = tree.focus().unwrap();
+            let initial = leaves(tree.root());
+
+            tree.swap_focused(Dir::Next);
+            let after_next = leaves(tree.root());
+
+            if after_next != initial {
+                // swap_next moved something; swap_prev must restore it.
+                tree.swap_focused(Dir::Prev);
+                prop_assert_eq!(leaves(tree.root()), initial,
+                    "swap roundtrip must restore child order");
+                prop_assert_eq!(tree.focus(), Some(focused_id),
+                    "focus id must survive swap roundtrip");
+            }
         }
     }
 }
