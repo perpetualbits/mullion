@@ -114,3 +114,293 @@ impl Style {
         self
     }
 }
+
+// ── ColorDepth ────────────────────────────────────────────────────────────────
+
+/// Controls how [`Color::Rgb`] (and [`Color::Indexed`] at the 16-colour step)
+/// are downsampled before being emitted to the terminal.
+///
+/// Use [`Color::downsample`] to apply a depth to a single colour, or
+/// set [`CrosstermBackend::set_color_depth`](crate::CrosstermBackend::set_color_depth)
+/// to apply it automatically to every rendered cell.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ColorDepth {
+    /// Emit 24-bit truecolor (`38;2;r;g;b` / `48;2;r;g;b`) sequences.
+    ///
+    /// Identity transform: every [`Color`] variant passes through unchanged.
+    #[default]
+    TrueColor,
+    /// Map [`Color::Rgb`] to the nearest xterm 256-colour palette index.
+    ///
+    /// Both the 6×6×6 RGB cube (indices 16–231) and the 24-step grayscale ramp
+    /// (indices 232–255) are evaluated; whichever has a smaller squared RGB
+    /// distance wins.  Named colours, [`Color::Indexed`], and [`Color::Reset`]
+    /// pass through unchanged.
+    Palette256,
+    /// Map [`Color::Rgb`] and [`Color::Indexed`] to the nearest of the 16 ANSI
+    /// named colour variants (`Black`, `Red`, …, `White`).
+    ///
+    /// Named colours and [`Color::Reset`] pass through unchanged.
+    /// [`Color::Indexed`] is first expanded to its RGB components (using the
+    /// standard xterm cube / grayscale formulae) and then matched against the
+    /// ANSI 16 table.
+    Palette16,
+}
+
+// ── Downsampling helpers ──────────────────────────────────────────────────────
+
+/// xterm-256 cube level values for each axis step (0–5).
+///
+/// Step 0 is black (0); steps 1–5 are 95, 135, 175, 215, 255.
+const CUBE_LEVELS: [u8; 6] = [0, 95, 135, 175, 215, 255];
+
+/// Standard RGB values for ANSI colour indices 0–15 (the 16 named variants).
+///
+/// The table order is: Black, Red, Green, Yellow, Blue, Magenta, Cyan,
+/// Gray (ANSI 7 = standard white), DarkGray (ANSI 8 = bright black),
+/// LightRed … LightCyan, White (ANSI 15 = bright white).
+const ANSI16_RGB: [(u8, u8, u8); 16] = [
+    (  0,   0,   0), // 0  Black
+    (128,   0,   0), // 1  Red      (dark)
+    (  0, 128,   0), // 2  Green    (dark)
+    (128, 128,   0), // 3  Yellow   (dark)
+    (  0,   0, 128), // 4  Blue     (dark)
+    (128,   0, 128), // 5  Magenta  (dark)
+    (  0, 128, 128), // 6  Cyan     (dark)
+    (192, 192, 192), // 7  Gray     (standard white  / ANSI 7)
+    (128, 128, 128), // 8  DarkGray (bright black    / ANSI 8)
+    (255,   0,   0), // 9  LightRed
+    (  0, 255,   0), // 10 LightGreen
+    (255, 255,   0), // 11 LightYellow
+    (  0,   0, 255), // 12 LightBlue
+    (255,   0, 255), // 13 LightMagenta
+    (  0, 255, 255), // 14 LightCyan
+    (255, 255, 255), // 15 White    (bright white    / ANSI 15)
+];
+
+/// Squared Euclidean distance between two 8-bit channel values.
+fn sq_dist(a: u8, b: u8) -> u32 {
+    let d = a as i32 - b as i32;
+    (d * d) as u32
+}
+
+/// Return the xterm cube level index (0–5) whose value is closest to `v`.
+fn nearest_cube_level(v: u8) -> usize {
+    CUBE_LEVELS
+        .iter()
+        .enumerate()
+        .min_by_key(|&(_, &l)| sq_dist(v, l))
+        .map(|(i, _)| i)
+        .unwrap() // non-empty slice
+}
+
+/// Return the grayscale ramp sub-index `n` (0–23) whose entry is closest
+/// to the point `(r, g, b)`.
+///
+/// Gray ramp values are `8 + 10*n`; the optimal continuous target is the
+/// channel mean `(r+g+b)/3`, and the nearest ramp entry is found by iterating
+/// all 24 values (negligible cost).
+fn nearest_gray_n(r: u8, g: u8, b: u8) -> u8 {
+    let (r, g, b) = (r as i32, g as i32, b as i32);
+    (0u8..24)
+        .min_by_key(|&n| {
+            let v = 8 + 10 * n as i32;
+            (r - v) * (r - v) + (g - v) * (g - v) + (b - v) * (b - v)
+        })
+        .unwrap() // non-empty range
+}
+
+/// Expand a palette index to its RGB components.
+///
+/// Covers all three xterm-256 regions:
+/// - 0–15: the 16 ANSI colours (see `ANSI16_RGB`).
+/// - 16–231: 6×6×6 RGB cube using `CUBE_LEVELS`.
+/// - 232–255: 24-step grayscale ramp (`8 + 10*(i − 232)`).
+fn indexed_to_rgb(i: u8) -> (u8, u8, u8) {
+    if i < 16 {
+        ANSI16_RGB[i as usize]
+    } else if i < 232 {
+        let i = i - 16;
+        (
+            CUBE_LEVELS[(i / 36) as usize],
+            CUBE_LEVELS[((i % 36) / 6) as usize],
+            CUBE_LEVELS[(i % 6) as usize],
+        )
+    } else {
+        // Grayscale ramp: values 8, 18, 28 … 238.
+        let v = 8 + 10 * (i - 232);
+        (v, v, v)
+    }
+}
+
+/// Map `(r, g, b)` to the nearest of the 16 ANSI named [`Color`] variants.
+///
+/// Uses the squared Euclidean distance in RGB space; ties are broken by the
+/// lower ANSI index (the array iteration order).
+fn nearest_ansi16(r: u8, g: u8, b: u8) -> Color {
+    const VARIANTS: [Color; 16] = [
+        Color::Black, Color::Red,          Color::Green,        Color::Yellow,
+        Color::Blue,  Color::Magenta,      Color::Cyan,         Color::Gray,
+        Color::DarkGray, Color::LightRed,  Color::LightGreen,   Color::LightYellow,
+        Color::LightBlue, Color::LightMagenta, Color::LightCyan, Color::White,
+    ];
+    VARIANTS
+        .iter()
+        .zip(ANSI16_RGB.iter())
+        .min_by_key(|&(_, &(cr, cg, cb))| {
+            sq_dist(r, cr) + sq_dist(g, cg) + sq_dist(b, cb)
+        })
+        .map(|(&c, _)| c)
+        .unwrap() // non-empty slice
+}
+
+impl Color {
+    /// Map this colour down to `depth`.
+    ///
+    /// | Variant        | TrueColor | Palette256                      | Palette16                  |
+    /// |----------------|-----------|---------------------------------|----------------------------|
+    /// | `Rgb`          | identity  | nearest xterm-256 cube or gray  | nearest ANSI 16 named      |
+    /// | `Indexed`      | identity  | identity                        | nearest ANSI 16 (via RGB expansion) |
+    /// | named / `Reset`| identity  | identity                        | identity                   |
+    ///
+    /// For `Palette256`, both the 6×6×6 cube and the grayscale ramp are
+    /// evaluated; the one with the smaller squared RGB distance wins.
+    pub fn downsample(self, depth: ColorDepth) -> Color {
+        match depth {
+            ColorDepth::TrueColor => self,
+
+            ColorDepth::Palette256 => {
+                let Color::Rgb(r, g, b) = self else { return self; };
+
+                // Cube candidate: find the nearest level index per channel.
+                let ri = nearest_cube_level(r);
+                let gi = nearest_cube_level(g);
+                let bi = nearest_cube_level(b);
+                let cube_idx = (16 + 36 * ri + 6 * gi + bi) as u8;
+                let cube_dist = sq_dist(r, CUBE_LEVELS[ri])
+                    + sq_dist(g, CUBE_LEVELS[gi])
+                    + sq_dist(b, CUBE_LEVELS[bi]);
+
+                // Grayscale ramp candidate.
+                let gn  = nearest_gray_n(r, g, b);
+                let gv  = 8u8 + 10 * gn;
+                let gray_dist = sq_dist(r, gv) + sq_dist(g, gv) + sq_dist(b, gv);
+
+                // Prefer the gray ramp when it is strictly closer (or equal, cube wins).
+                if gray_dist < cube_dist {
+                    Color::Indexed(232 + gn)
+                } else {
+                    Color::Indexed(cube_idx)
+                }
+            }
+
+            ColorDepth::Palette16 => match self {
+                Color::Rgb(r, g, b) => nearest_ansi16(r, g, b),
+                Color::Indexed(i) => {
+                    let (r, g, b) = indexed_to_rgb(i);
+                    nearest_ansi16(r, g, b)
+                }
+                // Named colours and Reset are already within the 16-colour set.
+                _ => self,
+            },
+        }
+    }
+}
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── TrueColor is identity ─────────────────────────────────────────────
+
+    #[test]
+    fn truecolor_is_identity_for_all_variants() {
+        for c in [
+            Color::Reset, Color::Black, Color::LightRed, Color::White,
+            Color::Gray, Color::DarkGray, Color::Indexed(42), Color::Rgb(100, 200, 50),
+        ] {
+            assert_eq!(c.downsample(ColorDepth::TrueColor), c,
+                "{c:?} must pass through TrueColor unchanged");
+        }
+    }
+
+    // ── Palette256 ────────────────────────────────────────────────────────
+
+    #[test]
+    fn palette256_pure_red_maps_to_cube_196() {
+        // Cube (5,0,0): 16 + 36×5 + 6×0 + 0 = 196.
+        assert_eq!(
+            Color::Rgb(255, 0, 0).downsample(ColorDepth::Palette256),
+            Color::Indexed(196),
+        );
+    }
+
+    #[test]
+    fn palette256_black_maps_to_indexed_16() {
+        // Cube (0,0,0): 16 + 0 + 0 + 0 = 16.
+        assert_eq!(
+            Color::Rgb(0, 0, 0).downsample(ColorDepth::Palette256),
+            Color::Indexed(16),
+        );
+    }
+
+    #[test]
+    fn palette256_midgray_maps_to_gray_ramp() {
+        // Rgb(128,128,128): exact gray ramp match at 8+10×12 = 128 → index 244.
+        let result = Color::Rgb(128, 128, 128).downsample(ColorDepth::Palette256);
+        match result {
+            Color::Indexed(i) => assert!(
+                (232..=255).contains(&i),
+                "midgray must land in the gray ramp (232–255), got {i}"
+            ),
+            other => panic!("expected Indexed(_), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn palette256_named_indexed_reset_unchanged() {
+        for c in [Color::Red, Color::LightCyan, Color::Indexed(100), Color::Reset] {
+            assert_eq!(c.downsample(ColorDepth::Palette256), c,
+                "{c:?} must be unchanged in Palette256");
+        }
+    }
+
+    // ── Palette16 ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn palette16_red_rgb_maps_to_light_red() {
+        assert_eq!(Color::Rgb(255, 0, 0).downsample(ColorDepth::Palette16), Color::LightRed);
+    }
+
+    #[test]
+    fn palette16_black_rgb_maps_to_black() {
+        assert_eq!(Color::Rgb(0, 0, 0).downsample(ColorDepth::Palette16), Color::Black);
+    }
+
+    #[test]
+    fn palette16_white_rgb_maps_to_white() {
+        assert_eq!(Color::Rgb(255, 255, 255).downsample(ColorDepth::Palette16), Color::White);
+    }
+
+    #[test]
+    fn palette16_indexed_cube_red_maps_to_red_family() {
+        // Indexed(196) = Rgb(255,0,0) in the cube → red variant.
+        let result = Color::Indexed(196).downsample(ColorDepth::Palette16);
+        assert!(
+            matches!(result, Color::LightRed | Color::Red),
+            "Indexed(196) must downsample to a red, got {result:?}",
+        );
+    }
+
+    #[test]
+    fn palette16_named_and_reset_unchanged() {
+        for c in [
+            Color::Black, Color::Red, Color::LightCyan, Color::Gray, Color::White, Color::Reset,
+        ] {
+            assert_eq!(c.downsample(ColorDepth::Palette16), c,
+                "{c:?} must pass through Palette16 unchanged");
+        }
+    }
+}

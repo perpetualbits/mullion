@@ -55,6 +55,7 @@ pub mod mouse;
 pub mod render;
 pub mod style;
 pub mod terminal;
+pub mod theme;
 pub mod tree;
 
 pub use backend::{Backend, CrosstermBackend, TestBackend};
@@ -65,7 +66,8 @@ pub use geometry::Rect;
 pub use input::{InputRouter, Keymap, KeyCode, KeyEvent, KeyModifiers, KeyOutcome, MouseButton, MouseEvent, MouseEventKind, MouseOutcome, NavCommand};
 pub use mouse::{carousel_at, tile_at};
 pub use layout::{Constraint, Node, Orientation, Size, TileId};
-pub use style::{Color, Modifier, Style};
+pub use style::{Color, ColorDepth, Modifier, Style};
+pub use theme::Theme;
 pub use terminal::{poll_event, read_event, Terminal};
 pub use render::render_carousel;
 pub use tree::{focus_override, focus_path, leaves, node_by_id, node_by_id_mut, tile_id_of, Dir, Direction, Tree};

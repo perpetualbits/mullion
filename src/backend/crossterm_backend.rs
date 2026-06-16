@@ -20,7 +20,7 @@ use crate::{
     backend::Backend,
     buffer::Cell,
     geometry::Rect,
-    style::{Color, Modifier, Style},
+    style::{Color, ColorDepth, Modifier, Style},
 };
 
 // DEC private-mode sequences for the "synchronized output" extension (xterm et al.).
@@ -70,6 +70,10 @@ pub struct CrosstermBackend<W: Write> {
     /// Whether to enable mouse capture on [`enter`](Backend::enter).
     /// Default: `true`.  Set via [`set_mouse_capture`](CrosstermBackend::set_mouse_capture).
     mouse_enabled: bool,
+    /// Colour depth used to downsample [`Color::Rgb`] and [`Color::Indexed`] before
+    /// emitting SGR sequences.  Default: [`ColorDepth::TrueColor`] (identity).
+    /// Set via [`set_color_depth`](CrosstermBackend::set_color_depth).
+    color_depth: ColorDepth,
 }
 
 impl<W: Write> CrosstermBackend<W> {
@@ -78,7 +82,13 @@ impl<W: Write> CrosstermBackend<W> {
     /// Mouse capture is enabled by default; call [`set_mouse_capture(false)`](CrosstermBackend::set_mouse_capture)
     /// before [`enter`](Backend::enter) to opt out.
     pub fn new(writer: W) -> Self {
-        Self { writer, last_style: None, entered: false, mouse_enabled: true }
+        Self {
+            writer,
+            last_style:  None,
+            entered:     false,
+            mouse_enabled: true,
+            color_depth: ColorDepth::default(),
+        }
     }
 
     /// Enable or disable mouse capture for the next [`enter`](Backend::enter) call.
@@ -89,6 +99,16 @@ impl<W: Write> CrosstermBackend<W> {
     /// `enter` has been called has no effect on the current session.
     pub fn set_mouse_capture(&mut self, enabled: bool) {
         self.mouse_enabled = enabled;
+    }
+
+    /// Set the colour depth applied during [`draw`](Backend::draw).
+    ///
+    /// [`ColorDepth::TrueColor`] (the default) is a no-op.  [`ColorDepth::Palette256`]
+    /// maps `Rgb` colours to the nearest xterm-256 entry; [`ColorDepth::Palette16`]
+    /// maps `Rgb` and `Indexed` to the nearest of the 16 ANSI named colours.
+    /// Call this before the first draw call for consistent results.
+    pub fn set_color_depth(&mut self, depth: ColorDepth) {
+        self.color_depth = depth;
     }
 
     /// Write the escape sequences that restore the terminal to its normal state.
@@ -221,9 +241,16 @@ impl<W: Write> Backend for CrosstermBackend<W> {
         &mut self,
         changes: impl Iterator<Item = (u16, u16, &'a Cell)>,
     ) -> io::Result<()> {
+        let depth = self.color_depth;
         for (x, y, cell) in changes {
             queue!(self.writer, MoveTo(x, y))?;
-            let style = cell.style;
+            // Downsample the cell's fg/bg before comparing and emitting so that
+            // last_style always tracks what was actually sent to the terminal.
+            let style = Style {
+                fg:   cell.style.fg.downsample(depth),
+                bg:   cell.style.bg.downsample(depth),
+                mods: cell.style.mods,
+            };
             if self.last_style != Some(style) {
                 // Style changed: emit a new SGR sequence and record it.
                 emit_style(&mut self.writer, style)?;
@@ -371,6 +398,44 @@ mod tests {
         assert!(out.contains("\x1b[?1049l"), "Drop must emit leave-alt-screen");
         assert!(out.contains("\x1b[?25h"), "Drop must emit show-cursor");
         assert!(out.contains("\x1b[?1000l"), "Drop must disable mouse capture");
+    }
+
+    #[test]
+    fn color_depth_truecolor_emits_rgb_sequence() {
+        use crate::buffer::Cell;
+        use crate::style::{Modifier, Style};
+        let mut buf = Vec::<u8>::new();
+        {
+            let mut backend = CrosstermBackend::new(&mut buf);
+            // TrueColor is the default: Rgb must produce a `38;2;` truecolor sequence.
+            let cell = Cell {
+                symbol: "X".into(),
+                style:  Style { fg: Color::Rgb(200, 100, 50), bg: Color::Reset, mods: Modifier::empty() },
+            };
+            backend.draw(std::iter::once((0u16, 0u16, &cell))).unwrap();
+        } // drop backend to release &mut buf borrow
+        let out = String::from_utf8_lossy(&buf);
+        assert!(out.contains("38;2;"), "TrueColor must emit truecolor fg: {out:?}");
+    }
+
+    #[test]
+    fn color_depth_palette16_omits_rgb_sequence() {
+        use crate::buffer::Cell;
+        use crate::style::{Modifier, Style};
+        let mut buf = Vec::<u8>::new();
+        {
+            let mut backend = CrosstermBackend::new(&mut buf);
+            backend.set_color_depth(ColorDepth::Palette16);
+            // Rgb is downsampled to a named color before emitting; no 38;2; should appear.
+            let cell = Cell {
+                symbol: "X".into(),
+                style:  Style { fg: Color::Rgb(200, 100, 50), bg: Color::Reset, mods: Modifier::empty() },
+            };
+            backend.draw(std::iter::once((0u16, 0u16, &cell))).unwrap();
+        } // drop backend to release &mut buf borrow
+        let out = String::from_utf8_lossy(&buf);
+        assert!(!out.contains("38;2;"), "Palette16 must not emit truecolor fg: {out:?}");
+        assert!(!out.contains("48;2;"), "Palette16 must not emit truecolor bg: {out:?}");
     }
 
     #[test]
