@@ -42,6 +42,14 @@ pub enum NavCommand {
     SwapNext,
     /// Swap the focused leaf with its previous sibling.
     SwapPrev,
+    /// Zoom into the currently focused leaf (tmux-style fullscreen).
+    ///
+    /// Executes [`Tree::zoom_focus`].  A no-op if already zoomed to the focus.
+    ZoomIn,
+    /// Pop one zoom level, returning to the previous view.
+    ///
+    /// Executes [`Tree::zoom_out`].  A no-op when not zoomed.
+    ZoomOut,
 }
 
 // ── KeyOutcome ────────────────────────────────────────────────────────────────
@@ -76,6 +84,8 @@ pub enum KeyOutcome {
 /// | `f` | `Flip` |
 /// | `n` | `SwapNext` |
 /// | `p` | `SwapPrev` |
+/// | `z` | `ZoomIn` |
+/// | `Z` | `ZoomOut` |
 pub struct Keymap {
     prefix: KeyEvent,
     bindings: Vec<(KeyEvent, NavCommand)>,
@@ -114,6 +124,8 @@ impl Default for Keymap {
                 (KeyEvent::new(Char('f'), KeyModifiers::NONE), NavCommand::Flip),
                 (KeyEvent::new(Char('n'), KeyModifiers::NONE), NavCommand::SwapNext),
                 (KeyEvent::new(Char('p'), KeyModifiers::NONE), NavCommand::SwapPrev),
+                (KeyEvent::new(Char('z'), KeyModifiers::NONE), NavCommand::ZoomIn),
+                (KeyEvent::new(Char('Z'), KeyModifiers::NONE), NavCommand::ZoomOut),
             ],
         )
     }
@@ -195,13 +207,15 @@ impl Default for InputRouter {
 
 fn execute_nav(cmd: NavCommand, tree: &mut Tree) {
     match cmd {
-        NavCommand::FocusNext => tree.focus_next(),
-        NavCommand::FocusPrev => tree.focus_prev(),
+        NavCommand::FocusNext  => tree.focus_next(),
+        NavCommand::FocusPrev  => tree.focus_prev(),
         NavCommand::FocusFirst => tree.focus_first(),
-        NavCommand::FocusLast => tree.focus_last(),
-        NavCommand::Flip => tree.flip_focused_parent(),
-        NavCommand::SwapNext => tree.swap_focused(Dir::Next),
-        NavCommand::SwapPrev => tree.swap_focused(Dir::Prev),
+        NavCommand::FocusLast  => tree.focus_last(),
+        NavCommand::Flip       => tree.flip_focused_parent(),
+        NavCommand::SwapNext   => tree.swap_focused(Dir::Next),
+        NavCommand::SwapPrev   => tree.swap_focused(Dir::Prev),
+        NavCommand::ZoomIn     => { tree.zoom_focus(); }
+        NavCommand::ZoomOut    => tree.zoom_out(),
     }
 }
 
@@ -294,7 +308,8 @@ mod tests {
         let mut tree = two_tile_tree();
         let before = tree.focus();
         router.handle(ctrl('w'), &mut tree);
-        let outcome = router.handle(key(KeyCode::Char('z')), &mut tree); // unmapped
+        // 'Q' is not in the default keymap → Consumed, no tree change.
+        let outcome = router.handle(key(KeyCode::Char('Q')), &mut tree);
         assert!(matches!(outcome, KeyOutcome::Consumed));
         assert_eq!(tree.focus(), before);
         // Back in Normal.
@@ -341,6 +356,8 @@ mod tests {
             (key(KeyCode::Char('f')), Flip),
             (key(KeyCode::Char('n')), SwapNext),
             (key(KeyCode::Char('p')), SwapPrev),
+            (key(KeyCode::Char('z')), ZoomIn),
+            (key(KeyCode::Char('Z')), ZoomOut),
         ];
 
         let root = Node::Split {
@@ -378,5 +395,31 @@ mod tests {
         router.handle(ctrl('w'), &mut tree);
         router.handle(key(KeyCode::Char('f')), &mut tree); // Flip
         assert!(matches!(tree.root(), Node::Split { orientation: Orientation::Vertical, .. }));
+    }
+
+    #[test]
+    fn zoom_in_via_router_drives_zoom_focus() {
+        let mut router = InputRouter::new();
+        // focus starts at tile 0; Ctrl-w z → ZoomIn → zoom_focus() into tile 0.
+        let mut tree = Tree::new(h_split(vec![tile(0), tile(1)]));
+        router.handle(ctrl('w'), &mut tree);
+        let outcome = router.handle(key(KeyCode::Char('z')), &mut tree);
+        assert!(matches!(outcome, KeyOutcome::Nav(NavCommand::ZoomIn)));
+        assert!(tree.is_zoomed(), "tree must be zoomed after ZoomIn");
+        assert_eq!(tree.zoom_depth(), 1);
+        assert!(matches!(tree.effective_root(), Node::Tile(0)));
+    }
+
+    #[test]
+    fn zoom_out_via_router_drives_zoom_out() {
+        let mut router = InputRouter::new();
+        let mut tree = Tree::new(h_split(vec![tile(0), tile(1)]));
+        tree.zoom_focus(); // zoom in manually so we can test zoom-out
+        assert!(tree.is_zoomed());
+
+        router.handle(ctrl('w'), &mut tree);
+        let outcome = router.handle(key(KeyCode::Char('Z')), &mut tree);
+        assert!(matches!(outcome, KeyOutcome::Nav(NavCommand::ZoomOut)));
+        assert!(!tree.is_zoomed(), "tree must not be zoomed after ZoomOut");
     }
 }

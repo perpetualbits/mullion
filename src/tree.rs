@@ -1,10 +1,20 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 // Copyright (C) 2026  Epsilon Null Operation
-//! Focus model and layout-tree owner.
+//! Focus model, zoom stack, and layout-tree owner.
 //!
-//! [`Tree`] wraps a [`Node`] root plus interaction state.  Today that state is
-//! just the focused tile; later phases extend this (scroll offsets in Phase 4,
-//! a zoom stack in Phase 5).
+//! [`Tree`] wraps a [`Node`] root plus interaction state:
+//!
+//! - **Focus** — which leaf tile is currently active (Phase 3).
+//! - **Carousel scroll** — embedded in each [`Node::Carousel`] (Phase 4).
+//! - **Zoom stack** — a `Vec<TileId>` that re-roots the *view* at a subtree
+//!   without touching the underlying tree (Phase 5).  While zoomed, focus
+//!   navigation stays inside the effective subtree; the full tree is intact.
+//!
+//! ## Effective root
+//!
+//! [`Tree::effective_root`] returns the node the app should solve and render:
+//! the deepest zoom target, or the real root when not zoomed.  All focus
+//! methods operate on this subtree.
 //!
 //! ## DFS order
 //!
@@ -310,19 +320,24 @@ fn reveal_focus_path(node: &mut Node, path: &[usize], rect: Rect) {
 
 // ── Tree ──────────────────────────────────────────────────────────────────────
 
-/// Owns a layout tree plus interaction state.  Today: the root node and which
-/// leaf is focused.  Later phases extend this (scroll offsets, zoom stack).
+/// Owns a layout tree plus interaction state.
+///
+/// The three state fields are:
+/// - `root` — the full layout tree (never pruned by zoom).
+/// - `focus` — the focused leaf tile id (or `None`).
+/// - `zoom` — re-root stack, outermost to innermost; empty = full-tree view.
 pub struct Tree {
     root: Node,
     focus: Option<TileId>,
+    zoom: Vec<TileId>,
 }
 
 impl Tree {
     /// Wrap a root node.  Focus initialises to the first leaf in DFS order,
-    /// or `None` if the tree has no `Tile` leaves.
+    /// or `None` if the tree has no `Tile` leaves.  Zoom starts empty.
     pub fn new(root: Node) -> Self {
         let focus = leaves(&root).into_iter().next();
-        Self { root, focus }
+        Self { root, focus, zoom: Vec::new() }
     }
 
     /// The root node.
@@ -330,11 +345,43 @@ impl Tree {
         &self.root
     }
 
-    /// Mutable access for `solve` / `render_shared` and for structural edits.
+    /// Mutable access for structural edits.
     ///
-    /// After editing the tree call [`ensure_focus_valid`](Tree::ensure_focus_valid).
+    /// Always the real root regardless of zoom.  After editing the tree call
+    /// [`ensure_focus_valid`](Tree::ensure_focus_valid) (and
+    /// [`ensure_zoom_valid`](Tree::ensure_zoom_valid) if the edit may have
+    /// removed zoomed-into nodes).  For rendering use
+    /// [`effective_root_mut`](Tree::effective_root_mut) instead.
     pub fn root_mut(&mut self) -> &mut Node {
         &mut self.root
+    }
+
+    /// The node the app should solve and render.
+    ///
+    /// Returns the deepest zoom target, or the real root when not zoomed.
+    /// If the zoom stack contains a stale id that no longer resolves, falls
+    /// back to the real root for this call; call
+    /// [`ensure_zoom_valid`](Tree::ensure_zoom_valid) to clean up the stack.
+    pub fn effective_root(&self) -> &Node {
+        match self.zoom.last().copied() {
+            None => &self.root,
+            Some(id) => node_by_id(&self.root, id).unwrap_or(&self.root),
+        }
+    }
+
+    /// Mutable version of [`effective_root`](Tree::effective_root) for passing
+    /// to `solve` / `render_carousel`.
+    pub fn effective_root_mut(&mut self) -> &mut Node {
+        let id = match self.zoom.last().copied() {
+            None => return &mut self.root,
+            Some(id) => id,
+        };
+        // Two-phase borrow: shared check first so the mutable borrow can follow.
+        if node_by_id(&self.root, id).is_some() {
+            node_by_id_mut(&mut self.root, id).unwrap()
+        } else {
+            &mut self.root
+        }
     }
 
     /// The currently focused tile id, or `None` if the tree has no leaves.
@@ -342,10 +389,14 @@ impl Tree {
         self.focus
     }
 
-    /// Focus a specific leaf.  Returns `false` (and leaves focus unchanged)
-    /// if `id` is not a `Tile` leaf currently in the tree.
+    /// Focus a specific leaf.  Returns `false` (and leaves focus unchanged) if
+    /// `id` is not a `Tile` leaf within the **effective subtree**.
+    ///
+    /// While zoomed, leaves outside the zoom target are rejected — use
+    /// [`zoom_reset`](Tree::zoom_reset) first to escape the zoom and then set
+    /// focus on the full tree.
     pub fn focus_set(&mut self, id: TileId) -> bool {
-        if leaves(&self.root).contains(&id) {
+        if leaves(self.effective_root()).contains(&id) {
             self.focus = Some(id);
             true
         } else {
@@ -353,12 +404,13 @@ impl Tree {
         }
     }
 
-    /// Move focus to the next leaf in DFS order, wrapping at the end.
+    /// Move focus to the next leaf in DFS order within the **effective
+    /// subtree**, wrapping at the end.
     ///
     /// If focus is `None` but leaves exist, selects the first leaf.
-    /// No-op if the tree has no leaves.
+    /// No-op if the effective subtree has no leaves.
     pub fn focus_next(&mut self) {
-        let ls = leaves(&self.root);
+        let ls = leaves(self.effective_root());
         if ls.is_empty() {
             return;
         }
@@ -371,12 +423,13 @@ impl Tree {
         });
     }
 
-    /// Move focus to the previous leaf in DFS order, wrapping at the start.
+    /// Move focus to the previous leaf in DFS order within the **effective
+    /// subtree**, wrapping at the start.
     ///
     /// If focus is `None` but leaves exist, selects the last leaf.
-    /// No-op if the tree has no leaves.
+    /// No-op if the effective subtree has no leaves.
     pub fn focus_prev(&mut self) {
-        let ls = leaves(&self.root);
+        let ls = leaves(self.effective_root());
         if ls.is_empty() {
             return;
         }
@@ -389,32 +442,128 @@ impl Tree {
         });
     }
 
-    /// Move focus to the first leaf in DFS order.
+    /// Move focus to the first leaf of the **effective subtree**.
     ///
-    /// No-op if the tree has no leaves.
+    /// No-op if the effective subtree has no leaves.
     pub fn focus_first(&mut self) {
-        self.focus = leaves(&self.root).into_iter().next();
+        self.focus = leaves(self.effective_root()).into_iter().next();
     }
 
-    /// Move focus to the last leaf in DFS order.
+    /// Move focus to the last leaf of the **effective subtree**.
     ///
-    /// No-op if the tree has no leaves.
+    /// No-op if the effective subtree has no leaves.
     pub fn focus_last(&mut self) {
-        self.focus = leaves(&self.root).into_iter().last();
+        self.focus = leaves(self.effective_root()).into_iter().last();
     }
 
     /// Re-validate focus after a structural edit.
     ///
-    /// If focus is `None` or points to an id no longer present in the tree,
-    /// reset it to the first leaf (or `None` if the tree is now empty).
-    /// A focus id that still exists is left untouched — focus follows the *id*,
-    /// not a position, so adding/removing/reordering *other* leaves never moves it.
+    /// If focus is `None` or points to an id no longer present in the
+    /// **effective subtree**, reset it to that subtree's first leaf (or `None`
+    /// if it has no leaves).  A focus id that still exists is left untouched.
+    ///
+    /// Pair with [`ensure_zoom_valid`](Tree::ensure_zoom_valid) when the edit
+    /// may have removed nodes that the zoom stack points into.
     pub fn ensure_focus_valid(&mut self) {
-        let ls = leaves(&self.root);
+        let ls = leaves(self.effective_root());
         match self.focus {
             Some(id) if ls.contains(&id) => {}
             _ => self.focus = ls.into_iter().next(),
         }
+    }
+
+    // ── Zoom ──────────────────────────────────────────────────────────────
+
+    /// Whether any zoom level is active.
+    pub fn is_zoomed(&self) -> bool {
+        !self.zoom.is_empty()
+    }
+
+    /// Number of active zoom levels (0 = not zoomed).
+    pub fn zoom_depth(&self) -> usize {
+        self.zoom.len()
+    }
+
+    /// Re-root the view at the addressable node `id` (a `Tile` or `Carousel`).
+    ///
+    /// `id` must be reachable within the **current effective subtree** — you can
+    /// only zoom into something in view.  Returns `false` (no change) if `id` is
+    /// absent from the effective subtree or is already the effective root.
+    ///
+    /// On success the zoom stack is pushed.  If the current focus is not a leaf
+    /// of the new effective subtree, focus moves to that subtree's first leaf.
+    ///
+    /// ## Zooming into a `Split`
+    ///
+    /// `Split` nodes carry no id, so they cannot be addressed here.  To zoom
+    /// into a split grouping, wrap it in a `Carousel` or assign ids via a
+    /// future mechanism (noted for a later phase).
+    pub fn zoom_to(&mut self, id: TileId) -> bool {
+        // Reject if id is already the effective root.
+        let is_current_root = match self.effective_root() {
+            Node::Tile(tid)             => *tid == id,
+            Node::Carousel { id: cid, .. } => *cid == id,
+            Node::Split { .. }          => false,
+        };
+        if is_current_root { return false; }
+
+        // Reject if id is not reachable from the current effective subtree.
+        if node_by_id(self.effective_root(), id).is_none() { return false; }
+
+        self.zoom.push(id);
+
+        // Move focus into the new subtree when it fell outside.
+        let focus_valid = self.focus
+            .map_or(false, |fid| leaves(self.effective_root()).contains(&fid));
+        if !focus_valid {
+            self.focus = leaves(self.effective_root()).into_iter().next();
+        }
+
+        true
+    }
+
+    /// Zoom into the currently focused leaf (tmux-style fullscreen).
+    ///
+    /// Equivalent to `zoom_to(self.focus().unwrap())`.  No-op when there is no
+    /// focus or the focus is already the effective root.
+    pub fn zoom_focus(&mut self) -> bool {
+        match self.focus {
+            Some(id) => self.zoom_to(id),
+            None => false,
+        }
+    }
+
+    /// Pop one zoom level.  No-op when not zoomed.
+    ///
+    /// Focus is left unchanged; the previously zoomed-out-of subtree still
+    /// contains the same focus id, so focus remains valid within the wider view.
+    pub fn zoom_out(&mut self) {
+        self.zoom.pop();
+    }
+
+    /// Pop all zoom levels, returning to the real root.
+    pub fn zoom_reset(&mut self) {
+        self.zoom.clear();
+    }
+
+    /// Re-validate the zoom stack after a structural edit.
+    ///
+    /// Walks outermost → innermost; truncates the stack at the first id that no
+    /// longer resolves within its parent context.  A pruned subtree drops its
+    /// entire inner chain.  Pair with [`ensure_focus_valid`](Tree::ensure_focus_valid).
+    pub fn ensure_zoom_valid(&mut self) {
+        let valid_len = {
+            let mut current: &Node = &self.root;
+            let mut len = 0usize;
+            for &id in &self.zoom {
+                match node_by_id(current, id) {
+                    Some(n) => { current = n; len += 1; }
+                    None    => break,
+                }
+            }
+            len
+        }; // shared borrow of self.root ends here
+        self.zoom.truncate(valid_len);
     }
 
     /// Flip the orientation of the [`Split`](Node::Split) that is the focused
@@ -1140,6 +1289,186 @@ mod tests {
         }
     }
 
+    // ── zoom ──────────────────────────────────────────────────────────────
+
+    /// H-split[Tile(0), Carousel(id=99)[Tile(1), Tile(2)], Tile(3)]
+    fn zoom_test_tree() -> Tree {
+        Tree::new(h_split(vec![
+            tile(0),
+            carousel(99, vec![tile(1), tile(2)]),
+            tile(3),
+        ]))
+    }
+
+    #[test]
+    fn zoom_to_carousel_succeeds() {
+        let mut tree = zoom_test_tree();
+        assert!(!tree.is_zoomed());
+        let ok = tree.zoom_to(99);
+        assert!(ok, "zoom to carousel id=99 must succeed");
+        assert!(tree.is_zoomed());
+        assert_eq!(tree.zoom_depth(), 1);
+        assert!(matches!(tree.effective_root(), Node::Carousel { id: 99, .. }));
+    }
+
+    #[test]
+    fn zoom_to_id_not_in_current_view_fails() {
+        // First zoom into carousel 99, then try to zoom to tile 0 (outside it).
+        let mut tree = zoom_test_tree();
+        assert!(tree.zoom_to(99));
+        let ok = tree.zoom_to(0); // tile 0 is outside carousel 99
+        assert!(!ok, "zoom to an id outside the current view must fail");
+        assert_eq!(tree.zoom_depth(), 1, "zoom depth must be unchanged");
+    }
+
+    #[test]
+    fn zoom_to_current_effective_root_fails() {
+        let mut tree = zoom_test_tree();
+        tree.zoom_to(99);
+        let ok = tree.zoom_to(99); // 99 is already the effective root
+        assert!(!ok, "zoom_to the current effective root must return false");
+        assert_eq!(tree.zoom_depth(), 1, "zoom depth must be unchanged");
+    }
+
+    #[test]
+    fn nested_zoom_and_zoom_out() {
+        let mut tree = zoom_test_tree();
+        // Zoom into carousel(99), then into tile(1) inside it.
+        assert!(tree.zoom_to(99));
+        assert!(tree.zoom_to(1)); // tile 1 is inside carousel 99
+        assert_eq!(tree.zoom_depth(), 2);
+        assert!(matches!(tree.effective_root(), Node::Tile(1)));
+
+        tree.zoom_out(); // pop innermost
+        assert_eq!(tree.zoom_depth(), 1);
+        assert!(matches!(tree.effective_root(), Node::Carousel { id: 99, .. }));
+
+        tree.zoom_out(); // pop to real root
+        assert_eq!(tree.zoom_depth(), 0);
+        assert!(!tree.is_zoomed());
+
+        tree.zoom_out(); // extra zoom_out — no-op
+        assert_eq!(tree.zoom_depth(), 0);
+    }
+
+    #[test]
+    fn zoom_focus_and_zoom_reset() {
+        let mut tree = zoom_test_tree(); // focus = 0
+        let ok = tree.zoom_focus();
+        assert!(ok, "zoom_focus on tile 0 must succeed");
+        assert!(tree.is_zoomed());
+        assert!(matches!(tree.effective_root(), Node::Tile(0)));
+
+        tree.zoom_reset();
+        assert!(!tree.is_zoomed());
+        assert_eq!(tree.zoom_depth(), 0);
+        // Effective root is the real root again.
+        assert!(matches!(tree.effective_root(), Node::Split { .. }));
+    }
+
+    #[test]
+    fn focus_scoping_stays_inside_zoom() {
+        let mut tree = zoom_test_tree(); // focus = 0
+        assert!(tree.zoom_to(99)); // carousel contains tiles 1, 2
+
+        // focus moved to first leaf of carousel.
+        assert_eq!(tree.focus(), Some(1));
+
+        tree.focus_next();
+        assert_eq!(tree.focus(), Some(2), "must advance within carousel");
+        tree.focus_next();
+        assert_eq!(tree.focus(), Some(1), "must wrap within carousel, not escape");
+        tree.focus_prev();
+        assert_eq!(tree.focus(), Some(2), "prev wraps within carousel");
+        tree.focus_first();
+        assert_eq!(tree.focus(), Some(1), "first leaf of effective subtree");
+        tree.focus_last();
+        assert_eq!(tree.focus(), Some(2), "last leaf of effective subtree");
+    }
+
+    #[test]
+    fn focus_set_rejects_leaf_outside_zoom() {
+        let mut tree = zoom_test_tree();
+        assert!(tree.zoom_to(99));
+        assert!(!tree.focus_set(0), "tile 0 is outside zoomed carousel");
+        assert!(!tree.focus_set(3), "tile 3 is outside zoomed carousel");
+        assert!(tree.focus_set(1), "tile 1 is inside zoomed carousel");
+    }
+
+    #[test]
+    fn zoom_adjusts_focus_when_outside_new_subtree() {
+        // focus=0 (tile 0 is NOT in carousel 99); after zoom_to(99) focus must move.
+        let mut tree = zoom_test_tree();
+        assert_eq!(tree.focus(), Some(0));
+        assert!(tree.zoom_to(99));
+        assert_eq!(tree.focus(), Some(1), "focus must move to first leaf of carousel");
+    }
+
+    #[test]
+    fn focus_unchanged_when_inside_new_subtree() {
+        // focus=1, which IS in carousel(99); zoom_to(99) must not change focus.
+        let mut tree = zoom_test_tree();
+        tree.focus_set(1);
+        assert!(tree.zoom_to(99));
+        assert_eq!(tree.focus(), Some(1), "focus already inside new subtree — must be unchanged");
+    }
+
+    #[test]
+    fn zoom_out_leaves_focus_unchanged() {
+        let mut tree = zoom_test_tree();
+        assert!(tree.zoom_to(99));
+        assert_eq!(tree.focus(), Some(1)); // adjusted to first leaf of carousel
+        tree.zoom_out();
+        // Focus stays on tile 1, which is valid in the wider root.
+        assert_eq!(tree.focus(), Some(1), "focus must be unchanged after zoom_out");
+    }
+
+    #[test]
+    fn carousel_scroll_preserved_through_zoom_round_trip() {
+        let mut tree = zoom_test_tree();
+        tree.scroll_to(99, 7);
+        assert!(tree.zoom_to(99));
+        tree.zoom_out();
+        if let Some(Node::Carousel { scroll, .. }) = node_by_id(tree.root(), 99) {
+            assert_eq!(*scroll, 7, "scroll must survive zoom round-trip");
+        }
+    }
+
+    #[test]
+    fn ensure_zoom_valid_prunes_dangling_zoom_level() {
+        let mut tree = zoom_test_tree();
+        assert!(tree.zoom_to(99)); // zoom into carousel
+        // Structurally remove the carousel by replacing the tree root.
+        *tree.root_mut() = h_split(vec![tile(0), tile(3)]); // carousel(99) gone
+        tree.ensure_zoom_valid();
+        assert_eq!(tree.zoom_depth(), 0, "dangling zoom level must be pruned");
+        assert!(!tree.is_zoomed());
+    }
+
+    #[test]
+    fn ensure_zoom_valid_keeps_valid_levels() {
+        let mut tree = zoom_test_tree();
+        assert!(tree.zoom_to(99));
+        assert!(tree.zoom_to(1)); // depth=2
+        // Remove tile(2) but keep carousel(99) and tile(1).
+        if let Some(Node::Carousel { children, .. }) = node_by_id_mut(tree.root_mut(), 99) {
+            children.retain(|(_, n)| matches!(n, Node::Tile(1)));
+        }
+        tree.ensure_zoom_valid();
+        // Both zoom ids (99, 1) still resolve: no truncation.
+        assert_eq!(tree.zoom_depth(), 2, "valid zoom levels must be preserved");
+    }
+
+    #[test]
+    fn zoom_to_tile_id_succeeds() {
+        // zoom_to works for Tile nodes too (tmux fullscreen a single pane).
+        let mut tree = zoom_test_tree(); // focus = 0
+        let ok = tree.zoom_to(0);
+        assert!(ok, "zoom_to a Tile id must succeed");
+        assert!(matches!(tree.effective_root(), Node::Tile(0)));
+        assert_eq!(tree.zoom_depth(), 1);
+    }
+
     // ── scroll_focus_into_view ────────────────────────────────────────────
 
     /// Return the current scroll of the carousel identified by `car_id`.
@@ -1318,6 +1647,35 @@ mod tests {
     }
 
     proptest! {
+        /// After `zoom_to(id)` then `zoom_out()`, the previous depth and
+        /// effective-root identity (by address) are both restored.
+        #[test]
+        fn prop_zoom_roundtrip(tile_id in 0u64..3u64) {
+            // Tree: Carousel(id=200)[Tile(0), Tile(1), Tile(2)]
+            let root = Node::Carousel {
+                id: 200,
+                orientation: Orientation::Vertical,
+                scroll: 0,
+                children: (0u64..3).map(|i| (5u16, Node::Tile(i))).collect(),
+            };
+            let mut tree = Tree::new(root);
+            let depth_before = tree.zoom_depth();
+
+            // zoom into one of the inner tiles
+            prop_assume!(tree.zoom_to(tile_id));
+            prop_assert!(tree.is_zoomed());
+            prop_assert_eq!(tree.zoom_depth(), depth_before + 1);
+            prop_assert!(matches!(tree.effective_root(), Node::Tile(t) if *t == tile_id));
+
+            tree.zoom_out();
+            prop_assert_eq!(tree.zoom_depth(), depth_before, "depth must be restored");
+            prop_assert!(!tree.is_zoomed(), "must no longer be zoomed");
+            prop_assert!(
+                matches!(tree.effective_root(), Node::Carousel { id: 200, .. }),
+                "effective root must be the original carousel"
+            );
+        }
+
         /// After `scroll_focus_into_view`, the focused child's `[start, start+ext)`
         /// is contained in `[scroll, scroll+main_extent)`, or top-aligned when the
         /// child is taller than the viewport.
