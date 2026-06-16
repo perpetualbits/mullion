@@ -68,4 +68,4 @@ pub use layout::{Constraint, Node, Orientation, Size, TileId};
 pub use style::{Color, Modifier, Style};
 pub use terminal::{poll_event, read_event, Terminal};
 pub use render::render_carousel;
-pub use tree::{focus_override, focus_path, leaves, node_by_id, node_by_id_mut, tile_id_of, Dir, Tree};
+pub use tree::{focus_override, focus_path, leaves, node_by_id, node_by_id_mut, tile_id_of, Dir, Direction, Tree};

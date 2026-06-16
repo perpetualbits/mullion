@@ -26,7 +26,7 @@
 
 use crate::border::LineWeight;
 use crate::geometry::Rect;
-use crate::layout::{Axis, Node, Orientation, TileId, partition};
+use crate::layout::{Axis, Node, Orientation, TileId, partition, solve};
 
 // ── Free functions ────────────────────────────────────────────────────────────
 
@@ -185,6 +185,107 @@ pub enum Dir {
     Next,
     /// Swap with the previous sibling (lower index, earlier in DFS order).
     Prev,
+}
+
+// ── Direction ─────────────────────────────────────────────────────────────────
+
+/// Spatial direction used by [`Tree::focus_dir`] and [`Tree::focus_dir_cross`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Direction {
+    /// Towards the top of the screen.
+    Up,
+    /// Towards the bottom of the screen.
+    Down,
+    /// Towards the left edge of the screen.
+    Left,
+    /// Towards the right edge of the screen.
+    Right,
+}
+
+// ── Direction helpers ─────────────────────────────────────────────────────────
+
+/// Read the current axis without calling `resolve()` (which mutates
+/// `Adaptive::last` and requires a viewport rect).  For `Adaptive` the
+/// last-resolved axis is used; defaults to `Horizontal` before the first solve.
+fn peek_axis(orientation: &Orientation) -> Axis {
+    match orientation {
+        Orientation::Horizontal => Axis::Horizontal,
+        Orientation::Vertical   => Axis::Vertical,
+        Orientation::Adaptive { last, .. } => last.unwrap_or(Axis::Horizontal),
+    }
+}
+
+/// Walk `path` from `root` and return
+/// `(carousel_id, axis, child_idx_in_carousel, n_children)` for the
+/// **innermost** [`Carousel`](Node::Carousel) ancestor on the path.
+///
+/// `child_idx_in_carousel` is the index within that carousel's `children` vec
+/// that is on the path toward the focused leaf.  Returns `None` when no
+/// `Carousel` node lies on the path.
+fn nearest_carousel_ancestor(root: &Node, path: &[usize]) -> Option<(TileId, Axis, usize, usize)> {
+    let mut result = None;
+    let mut cur = root;
+    for &idx in path {
+        match cur {
+            Node::Carousel { id, orientation, children, .. } => {
+                result = Some((*id, peek_axis(orientation), idx, children.len()));
+                if idx < children.len() {
+                    cur = &children[idx].1;
+                } else {
+                    break;
+                }
+            }
+            Node::Split { children, .. } => {
+                if idx < children.len() {
+                    cur = &children[idx].1;
+                } else {
+                    break;
+                }
+            }
+            Node::Tile(_) => break,
+        }
+    }
+    result
+}
+
+/// Whether `candidate` lies strictly in `dir` from `focus`.
+fn is_in_direction(candidate: &Rect, focus: &Rect, dir: Direction) -> bool {
+    match dir {
+        Direction::Right => candidate.x >= focus.right(),
+        Direction::Left  => candidate.right() <= focus.x,
+        Direction::Down  => candidate.y >= focus.bottom(),
+        Direction::Up    => candidate.bottom() <= focus.y,
+    }
+}
+
+/// Length of the overlap between `candidate` and `focus` on the axis
+/// **perpendicular** to `dir`.
+fn perp_overlap(candidate: &Rect, focus: &Rect, dir: Direction) -> u16 {
+    match dir {
+        Direction::Left | Direction::Right =>
+            overlap_1d(candidate.y, candidate.bottom(), focus.y, focus.bottom()),
+        Direction::Up | Direction::Down =>
+            overlap_1d(candidate.x, candidate.right(), focus.x, focus.right()),
+    }
+}
+
+/// Gap in cells between `candidate` and `focus` along the primary axis of
+/// `dir`.  Zero when the rects are touching or overlapping.
+fn gap_distance(candidate: &Rect, focus: &Rect, dir: Direction) -> u16 {
+    match dir {
+        Direction::Right => candidate.x.saturating_sub(focus.right()),
+        Direction::Left  => focus.x.saturating_sub(candidate.right()),
+        Direction::Down  => candidate.y.saturating_sub(focus.bottom()),
+        Direction::Up    => focus.y.saturating_sub(candidate.bottom()),
+    }
+}
+
+/// Length of the intersection of `[a_lo, a_hi)` and `[b_lo, b_hi)`.
+/// Returns 0 for disjoint intervals.
+fn overlap_1d(a_lo: u16, a_hi: u16, b_lo: u16, b_hi: u16) -> u16 {
+    let lo = a_lo.max(b_lo);
+    let hi = a_hi.min(b_hi);
+    hi.saturating_sub(lo)
 }
 
 // ── Tree helpers ──────────────────────────────────────────────────────────────
@@ -624,6 +725,92 @@ impl Tree {
                 }
                 _ => {}
             }
+        }
+    }
+
+    /// Carousel-scoped directional focus.
+    ///
+    /// Finds the **nearest enclosing [`Carousel`](Node::Carousel)** in the path
+    /// from the effective root to the focused leaf and advances or retreats focus
+    /// by one sibling inside it, **wrapping** at both ends.
+    ///
+    /// The step direction is derived from the carousel's orientation:
+    /// - `Horizontal` carousel: `Left` → previous, `Right` → next.
+    /// - `Vertical` carousel: `Up` → previous, `Down` → next.
+    /// - A direction that crosses the carousel's axis is a no-op.
+    ///
+    /// No-op when there is no focus, no `Carousel` ancestor exists within the
+    /// effective subtree, or `dir` does not align with the carousel's axis.
+    pub fn focus_dir(&mut self, dir: Direction) {
+        let focus_id = match self.focus { Some(id) => id, None => return };
+
+        let path = {
+            let root = self.effective_root();
+            match focus_path(root, focus_id) {
+                Some(p) => p,
+                None => return,
+            }
+        };
+
+        let (carousel_id, axis, child_idx, n_children) = {
+            let root = self.effective_root();
+            match nearest_carousel_ancestor(root, &path) {
+                Some(info) => info,
+                None => return,
+            }
+        };
+
+        let step: i64 = match (axis, dir) {
+            (Axis::Vertical, Direction::Down) | (Axis::Horizontal, Direction::Right) =>  1,
+            (Axis::Vertical, Direction::Up)   | (Axis::Horizontal, Direction::Left)  => -1,
+            _ => return,
+        };
+
+        let new_idx = (child_idx as i64 + step).rem_euclid(n_children as i64) as usize;
+
+        let first_leaf = match node_by_id(&self.root, carousel_id) {
+            Some(Node::Carousel { children, .. }) => {
+                leaves(&children[new_idx].1).into_iter().next()
+            }
+            _ => return,
+        };
+        self.focus = first_leaf;
+    }
+
+    /// Geometric cross-boundary focus.
+    ///
+    /// Solves the **effective subtree** within `area` to obtain on-screen rects
+    /// for all currently visible leaves, then moves focus to the best candidate
+    /// that lies strictly in `dir` from the focused tile's rect.
+    ///
+    /// The best candidate is chosen by:
+    /// 1. Maximum perpendicular-axis overlap with the focused rect (alignment).
+    /// 2. Minimum gap along the primary axis (proximity tie-break).
+    /// 3. Lowest [`TileId`] (stable final tie-break).
+    ///
+    /// Unlike [`Tree::focus_dir`] this method **never wraps** and only considers tiles
+    /// visible in the effective subtree (zoom-aware).  No-op when there is no
+    /// focus, the focused tile is not visible, or no tile lies in `dir`.
+    pub fn focus_dir_cross(&mut self, dir: Direction, area: Rect) {
+        let focus_id = match self.focus { Some(id) => id, None => return };
+        let rects = solve(self.effective_root_mut(), area);
+
+        let focus_rect = match rects.iter().find(|(id, _)| *id == focus_id) {
+            Some((_, r)) => *r,
+            None => return,
+        };
+
+        let best = rects.iter()
+            .filter(|(id, r)| *id != focus_id && is_in_direction(r, &focus_rect, dir))
+            .max_by_key(|(id, r)| {
+                let overlap = perp_overlap(r, &focus_rect, dir);
+                let gap     = gap_distance(r, &focus_rect, dir);
+                (overlap, std::cmp::Reverse(gap), std::cmp::Reverse(*id))
+            })
+            .map(|(id, _)| *id);
+
+        if let Some(new_id) = best {
+            self.focus = Some(new_id);
         }
     }
 
@@ -1712,5 +1899,182 @@ mod tests {
                     "too-tall child: scroll must equal child_start");
             }
         }
+    }
+
+    // ── focus_dir ─────────────────────────────────────────────────────────
+
+    fn v_carousel(id: TileId, kids: Vec<Node>) -> Node {
+        Node::Carousel {
+            id,
+            orientation: Orientation::Vertical,
+            scroll: 0,
+            children: kids.into_iter().map(|n| (10u16, n)).collect(),
+        }
+    }
+
+    #[test]
+    fn focus_dir_down_in_vertical_carousel_advances_one_step() {
+        let mut tree = Tree::new(v_carousel(1, vec![tile(0), tile(1), tile(2)]));
+        assert_eq!(tree.focus(), Some(0));
+        tree.focus_dir(Direction::Down);
+        assert_eq!(tree.focus(), Some(1));
+        tree.focus_dir(Direction::Down);
+        assert_eq!(tree.focus(), Some(2));
+    }
+
+    #[test]
+    fn focus_dir_down_wraps_past_last_child() {
+        let mut tree = Tree::new(v_carousel(1, vec![tile(0), tile(1), tile(2)]));
+        tree.focus = Some(2);
+        tree.focus_dir(Direction::Down);
+        assert_eq!(tree.focus(), Some(0), "must wrap to first child");
+    }
+
+    #[test]
+    fn focus_dir_up_wraps_past_first_child() {
+        let mut tree = Tree::new(v_carousel(1, vec![tile(0), tile(1), tile(2)]));
+        tree.focus_dir(Direction::Up);
+        assert_eq!(tree.focus(), Some(2), "must wrap to last child");
+    }
+
+    #[test]
+    fn focus_dir_wrong_axis_is_noop_on_vertical_carousel() {
+        let mut tree = Tree::new(v_carousel(1, vec![tile(0), tile(1), tile(2)]));
+        tree.focus_dir(Direction::Left);
+        assert_eq!(tree.focus(), Some(0), "Left on a vertical carousel must be a no-op");
+        tree.focus_dir(Direction::Right);
+        assert_eq!(tree.focus(), Some(0), "Right on a vertical carousel must be a no-op");
+    }
+
+    #[test]
+    fn focus_dir_left_right_on_horizontal_carousel() {
+        let mut tree = Tree::new(carousel(99, vec![tile(0), tile(1), tile(2)]));
+        assert_eq!(tree.focus(), Some(0));
+        tree.focus_dir(Direction::Right);
+        assert_eq!(tree.focus(), Some(1));
+        tree.focus_dir(Direction::Left);
+        assert_eq!(tree.focus(), Some(0));
+    }
+
+    #[test]
+    fn focus_dir_noop_on_pure_split_tree() {
+        let mut tree = Tree::new(h_split(vec![tile(0), tile(1), tile(2)]));
+        tree.focus_dir(Direction::Right);
+        assert_eq!(tree.focus(), Some(0));
+    }
+
+    #[test]
+    fn focus_dir_carousel_inside_split_moves_within_carousel() {
+        let root = h_split(vec![
+            tile(0),
+            carousel(1, vec![tile(1), tile(2), tile(3)]),
+        ]);
+        let mut tree = Tree::new(root);
+        assert_eq!(tree.focus(), Some(0));
+
+        // Tile(0) has no carousel ancestor → no-op.
+        tree.focus_dir(Direction::Right);
+        assert_eq!(tree.focus(), Some(0));
+
+        // Tile(1) is inside the carousel → advances.
+        tree.focus = Some(1);
+        tree.focus_dir(Direction::Right);
+        assert_eq!(tree.focus(), Some(2));
+    }
+
+    #[test]
+    fn focus_dir_noop_on_no_focus() {
+        let mut tree = Tree::new(v_carousel(1, vec![tile(0), tile(1)]));
+        tree.focus = None;
+        tree.focus_dir(Direction::Down);
+        assert_eq!(tree.focus(), None);
+    }
+
+    // ── focus_dir_cross ───────────────────────────────────────────────────
+
+    /// 2×2 grid: H-split [V-split[Tile(0), Tile(1)] | V-split[Tile(2), Tile(3)]].
+    /// In 40×20: Tile(0)=(0,0,20,10), Tile(1)=(0,10,20,10),
+    ///           Tile(2)=(20,0,20,10), Tile(3)=(20,10,20,10).
+    fn two_by_two() -> Node {
+        h_split(vec![
+            v_split(vec![tile(0), tile(1)]),
+            v_split(vec![tile(2), tile(3)]),
+        ])
+    }
+
+    #[test]
+    fn focus_dir_cross_right_moves_to_best_right_neighbor() {
+        let area = Rect::new(0, 0, 40, 20);
+        let mut tree = Tree::new(two_by_two());
+        assert_eq!(tree.focus(), Some(0)); // top-left
+        tree.focus_dir_cross(Direction::Right, area);
+        assert_eq!(tree.focus(), Some(2), "top-right has full Y-overlap and must win");
+    }
+
+    #[test]
+    fn focus_dir_cross_down_moves_to_best_lower_neighbor() {
+        let area = Rect::new(0, 0, 40, 20);
+        let mut tree = Tree::new(two_by_two());
+        tree.focus_dir_cross(Direction::Down, area);
+        assert_eq!(tree.focus(), Some(1), "bottom-left has full X-overlap and must win");
+    }
+
+    #[test]
+    fn focus_dir_cross_noop_at_screen_edge() {
+        let area = Rect::new(0, 0, 40, 20);
+        let mut tree = Tree::new(two_by_two()); // focus = tile(0) top-left
+        tree.focus_dir_cross(Direction::Left, area);
+        assert_eq!(tree.focus(), Some(0), "no tile to the left → no change");
+        tree.focus_dir_cross(Direction::Up, area);
+        assert_eq!(tree.focus(), Some(0), "no tile above → no change");
+    }
+
+    #[test]
+    fn focus_dir_cross_picks_better_perpendicular_overlap() {
+        // H-split [V-split[Focus(0), Padding(3)] | V-split[A(1), B(2)]].
+        // In 40×10 each H-half is 20 wide, each V-half is 5 tall.
+        // Focus(0): (0,0,20,5). A(1): (20,0,20,5). B(2): (20,5,20,5).
+        // Moving Right from Focus(0): A has Y-overlap=5, B has Y-overlap=0 → A wins.
+        let area = Rect::new(0, 0, 40, 10);
+        let root = h_split(vec![
+            v_split(vec![tile(0), tile(3)]),
+            v_split(vec![tile(1), tile(2)]),
+        ]);
+        let mut tree = Tree::new(root);
+        assert_eq!(tree.focus(), Some(0));
+        tree.focus_dir_cross(Direction::Right, area);
+        assert_eq!(tree.focus(), Some(1), "better Y-overlap must win");
+    }
+
+    #[test]
+    fn focus_dir_cross_prefers_closer_tile() {
+        // H-split [Focus(0) | Mid(1) | Far(2)].  30×10.
+        // Focus at x=[0,10), Mid at x=[10,20), Far at x=[20,30).
+        // Moving Right: both candidates are right of Focus; Mid is gap=0, Far is gap=10.
+        let area = Rect::new(0, 0, 30, 10);
+        let root = h_split(vec![tile(0), tile(1), tile(2)]);
+        let mut tree = Tree::new(root);
+        tree.focus_dir_cross(Direction::Right, area);
+        assert_eq!(tree.focus(), Some(1), "closer tile must be preferred");
+    }
+
+    #[test]
+    fn focus_dir_cross_is_zoom_aware() {
+        // H-split [Tile(0) | Tile(1)]; zoom into Tile(0).
+        // Effective root = Tile(0): no other tile visible → no-op.
+        let area = Rect::new(0, 0, 40, 10);
+        let mut tree = Tree::new(h_split(vec![tile(0), tile(1)]));
+        tree.zoom_focus();
+        tree.focus_dir_cross(Direction::Right, area);
+        assert_eq!(tree.focus(), Some(0), "Tile(1) outside zoom must not be reachable");
+    }
+
+    #[test]
+    fn focus_dir_cross_noop_on_no_focus() {
+        let area = Rect::new(0, 0, 40, 10);
+        let mut tree = Tree::new(h_split(vec![tile(0), tile(1)]));
+        tree.focus = None;
+        tree.focus_dir_cross(Direction::Right, area);
+        assert_eq!(tree.focus(), None);
     }
 }
