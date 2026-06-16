@@ -18,6 +18,10 @@ path = "examples/smoke.rs"
 name = "demo"
 path = "examples/demo.rs"
 
+[[example]]
+name = "showcase"
+path = "examples/showcase.rs"
+
 [dependencies]
 bitflags = "2"
 crossterm = "0.28"
