@@ -49,6 +49,7 @@ pub mod buffer;
 pub mod geometry;
 pub mod input;
 pub mod junction;
+pub mod label;
 pub mod layout;
 pub mod render;
 pub mod style;
@@ -56,6 +57,7 @@ pub mod terminal;
 pub mod tree;
 
 pub use backend::{Backend, CrosstermBackend, TestBackend};
+pub use label::{draw_label, label_period, Align, Label, Side};
 pub use border::{draw_box, frame_tiles, render_shared, BorderStyle, Borders, CornerStyle, LineWeight};
 pub use buffer::{Buffer, Cell};
 pub use geometry::Rect;

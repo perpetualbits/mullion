@@ -5,3 +5,4 @@
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
 cc 43fb5b12c41ab9d760796998743668b3b289ba911f3233979c2715a476f879ff # shrinks to root = Split { orientation: Horizontal, children: [(Constraint { size: Fill(1), min: 0, max: 65535 }, Tile(2)), (Constraint { size: Fill(1), min: 0, max: 65535 }, Split { orientation: Horizontal, children: [(Constraint { size: Fill(1), min: 0, max: 65535 }, Split { orientation: Horizontal, children: [(Constraint { size: Fill(1), min: 0, max: 65535 }, Tile(0)), (Constraint { size: Fill(1), min: 0, max: 65535 }, Tile(6))] }), (Constraint { size: Fill(1), min: 0, max: 65535 }, Tile(6))] })] }
+cc 4df585e42ea1cfb0c70d3dcfb720139e072ae0013c541e8c6c8bac5ad1d60208 # shrinks to initial_scroll = 0, focus_child = 0, viewport_h = 3
