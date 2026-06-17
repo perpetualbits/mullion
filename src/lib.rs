@@ -67,11 +67,14 @@ pub use buffer::{Buffer, Cell};
 pub use geometry::Rect;
 pub use input::{InputRouter, Keymap, KeyCode, KeyEvent, KeyModifiers, KeyOutcome, MouseButton, MouseEvent, MouseEventKind, MouseOutcome, NavCommand};
 pub use mouse::{carousel_at, tile_at};
-pub use layout::{Constraint, Node, Orientation, Size, TileId};
+pub use layout::{region_of, Constraint, Node, Orientation, Size, TileId};
 pub use capabilities::Capabilities;
 pub use charset::box_to_ascii;
 pub use style::{Color, ColorDepth, Modifier, Style};
 pub use theme::Theme;
 pub use terminal::{poll_event, read_event, Terminal};
 pub use render::render_carousel;
-pub use tree::{focus_override, focus_path, leaves, node_by_id, node_by_id_mut, tile_id_of, Dir, Direction, Tree};
+pub use tree::{
+    focus_override, focus_path, leaves, node_by_id, node_by_id_mut, node_id,
+    reconcile_carousel, reconcile_split, tile_id_of, Dir, Direction, Tree,
+};

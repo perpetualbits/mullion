@@ -24,9 +24,11 @@
 //! to a later phase; this module is restricted to id-based traversal and
 //! structural edits (`flip`, `swap`).
 
+use std::collections::HashMap;
+
 use crate::border::LineWeight;
 use crate::geometry::Rect;
-use crate::layout::{Axis, Node, Orientation, TileId, partition, solve};
+use crate::layout::{Axis, Constraint, Node, Orientation, TileId, partition, solve};
 
 // ── Free functions ────────────────────────────────────────────────────────────
 
@@ -39,6 +41,21 @@ pub fn tile_id_of(node: &Node) -> Option<TileId> {
         Node::Tile(id) => Some(*id),
         Node::Split { .. } => None,
         Node::Carousel { .. } => None, // container, not a focusable leaf
+    }
+}
+
+/// The addressable id of a node: a `Tile`'s id or a `Carousel`'s id.
+/// Returns `None` for a `Split`, which has no id.
+///
+/// This is the key used by [`reconcile_carousel`] and [`reconcile_split`]
+/// when diffing children and by [`region_of`](crate::layout::region_of) for
+/// the inverse rect lookup.  Unlike [`tile_id_of`], this also matches
+/// `Carousel` nodes.
+pub fn node_id(node: &Node) -> Option<TileId> {
+    match node {
+        Node::Tile(id) => Some(*id),
+        Node::Carousel { id, .. } => Some(*id),
+        Node::Split { .. } => None,
     }
 }
 
@@ -174,6 +191,71 @@ pub fn node_by_id_mut(root: &mut Node, id: TileId) -> Option<&mut Node> {
             None
         }
     }
+}
+
+// ── Reconcile ────────────────────────────────────────────────────────────────
+
+/// Reconcile a [`Node::Carousel`]'s children to a `desired` list in order.
+///
+/// For each `(id, extent)` in `desired`:
+/// - If a child with that id already exists, its **node is preserved** (keeping
+///   scroll offsets, nested state, etc.) and its main-axis extent is updated to
+///   the new value.
+/// - If the id is new, a fresh [`Node::Tile(id)`](Node::Tile) is inserted.
+///
+/// Children whose id is no longer in `desired` are dropped.  Children whose
+/// root is a `Split` (no addressable id) are also dropped — reconcile-managed
+/// children must be `Tile`- or `Carousel`-rooted.
+///
+/// Is a no-op when `node` is not a `Carousel`.
+///
+/// Call [`Tree::ensure_focus_valid`] / [`Tree::ensure_zoom_valid`] after
+/// reconciling if focus/zoom might reference dropped ids.
+pub fn reconcile_carousel(node: &mut Node, desired: &[(TileId, u16)]) {
+    let Node::Carousel { children, .. } = node else { return; };
+    // Drain into a map so survivors can be found in O(1).
+    let mut survivors: HashMap<TileId, (u16, Node)> = children
+        .drain(..)
+        .filter_map(|(ext, child)| node_id(&child).map(|id| (id, (ext, child))))
+        .collect();
+    // Rebuild in desired order: reuse the survivor's node, or create a fresh Tile.
+    *children = desired
+        .iter()
+        .map(|&(id, ext)| match survivors.remove(&id) {
+            Some((_, existing)) => (ext, existing),
+            None => (ext, Node::Tile(id)),
+        })
+        .collect();
+    // Remaining entries in `survivors` are vanished ids — dropped here.
+}
+
+/// Reconcile a [`Node::Split`]'s children to a `desired` list in order.
+///
+/// For each `(id, constraint)` in `desired`:
+/// - If a child with that id already exists, its **node is preserved** and its
+///   [`Constraint`] is updated to the new value.
+/// - If the id is new, a fresh [`Node::Tile(id)`](Node::Tile) is inserted.
+///
+/// Children whose id is no longer in `desired` are dropped.  Children whose
+/// root is a `Split` (no addressable id) are also dropped.
+///
+/// Is a no-op when `node` is not a `Split`.
+///
+/// Call [`Tree::ensure_focus_valid`] / [`Tree::ensure_zoom_valid`] after
+/// reconciling if focus/zoom might reference dropped ids.
+pub fn reconcile_split(node: &mut Node, desired: &[(TileId, Constraint)]) {
+    let Node::Split { children, .. } = node else { return; };
+    let mut survivors: HashMap<TileId, (Constraint, Node)> = children
+        .drain(..)
+        .filter_map(|(c, child)| node_id(&child).map(|id| (id, (c, child))))
+        .collect();
+    *children = desired
+        .iter()
+        .map(|&(id, c)| match survivors.remove(&id) {
+            Some((_, existing)) => (c, existing),
+            None => (c, Node::Tile(id)),
+        })
+        .collect();
 }
 
 // ── Dir ───────────────────────────────────────────────────────────────────────
@@ -2076,5 +2158,222 @@ mod tests {
         tree.focus = None;
         tree.focus_dir_cross(Direction::Right, area);
         assert_eq!(tree.focus(), None);
+    }
+
+    // ── node_id ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn node_id_tile_returns_its_id() {
+        assert_eq!(node_id(&Node::Tile(42)), Some(42));
+    }
+
+    #[test]
+    fn node_id_carousel_returns_its_id() {
+        let c = Node::Carousel {
+            id: 99,
+            orientation: Orientation::Horizontal,
+            scroll: 0,
+            children: vec![],
+        };
+        assert_eq!(node_id(&c), Some(99));
+    }
+
+    #[test]
+    fn node_id_split_is_none() {
+        assert_eq!(node_id(&h_split(vec![])), None);
+    }
+
+    // ── reconcile_carousel ────────────────────────────────────────────────
+
+    #[test]
+    fn reconcile_carousel_empty_to_desired_populates_in_order() {
+        let mut node = Node::Carousel {
+            id: 1,
+            orientation: Orientation::Vertical,
+            scroll: 0,
+            children: vec![],
+        };
+        reconcile_carousel(&mut node, &[(10, 5), (20, 8), (30, 3)]);
+        let Node::Carousel { children, .. } = &node else { panic!() };
+        assert_eq!(children.len(), 3);
+        assert_eq!(children[0], (5, Node::Tile(10)));
+        assert_eq!(children[1], (8, Node::Tile(20)));
+        assert_eq!(children[2], (3, Node::Tile(30)));
+    }
+
+    #[test]
+    fn reconcile_carousel_survivor_keeps_its_node_and_extent_is_updated() {
+        // Build a carousel with a nested carousel child that has a non-zero scroll.
+        let inner = Node::Carousel {
+            id: 77,
+            orientation: Orientation::Horizontal,
+            scroll: 5,  // distinctive state that proves the node survived
+            children: vec![(10, Node::Tile(99))],
+        };
+        let mut node = Node::Carousel {
+            id: 1,
+            orientation: Orientation::Vertical,
+            scroll: 0,
+            children: vec![(20, inner)],
+        };
+        // Reconcile: id 77 survives with a new extent of 30.
+        reconcile_carousel(&mut node, &[(77, 30)]);
+        let Node::Carousel { children, .. } = &node else { panic!() };
+        assert_eq!(children.len(), 1);
+        assert_eq!(children[0].0, 30, "extent must be updated to desired value");
+        // The inner carousel's scroll offset must be preserved.
+        let Node::Carousel { scroll, id, .. } = &children[0].1 else {
+            panic!("expected inner Carousel, got {:?}", children[0].1);
+        };
+        assert_eq!(*id, 77);
+        assert_eq!(*scroll, 5, "scroll must be preserved for surviving node");
+    }
+
+    #[test]
+    fn reconcile_carousel_vanished_ids_dropped_new_appear_as_tiles() {
+        let mut node = Node::Carousel {
+            id: 1,
+            orientation: Orientation::Vertical,
+            scroll: 0,
+            children: vec![
+                (10, Node::Tile(10)),
+                (10, Node::Tile(20)), // will vanish
+                (10, Node::Tile(30)),
+            ],
+        };
+        // 20 disappears; 40 is new; 10 and 30 survive.
+        reconcile_carousel(&mut node, &[(10, 10), (30, 10), (40, 10)]);
+        let Node::Carousel { children, .. } = &node else { panic!() };
+        assert_eq!(children.len(), 3);
+        assert_eq!(tile_id_of(&children[0].1), Some(10));
+        assert_eq!(tile_id_of(&children[1].1), Some(30));
+        assert_eq!(tile_id_of(&children[2].1), Some(40));
+    }
+
+    #[test]
+    fn reconcile_carousel_order_matches_desired() {
+        let mut node = Node::Carousel {
+            id: 1,
+            orientation: Orientation::Horizontal,
+            scroll: 0,
+            children: vec![
+                (10, Node::Tile(1)),
+                (10, Node::Tile(2)),
+                (10, Node::Tile(3)),
+            ],
+        };
+        // Permute: 3, 1, 2
+        reconcile_carousel(&mut node, &[(3, 10), (1, 10), (2, 10)]);
+        let Node::Carousel { children, .. } = &node else { panic!() };
+        assert_eq!(tile_id_of(&children[0].1), Some(3));
+        assert_eq!(tile_id_of(&children[1].1), Some(1));
+        assert_eq!(tile_id_of(&children[2].1), Some(2));
+    }
+
+    #[test]
+    fn reconcile_carousel_permutation_preserves_all_nodes() {
+        // All three children survive a permutation (no new tiles created).
+        let inner_a = Node::Carousel { id: 10, orientation: Orientation::Horizontal, scroll: 3, children: vec![] };
+        let inner_b = Node::Carousel { id: 20, orientation: Orientation::Horizontal, scroll: 7, children: vec![] };
+        let inner_c = Node::Tile(30);
+        let mut node = Node::Carousel {
+            id: 1,
+            orientation: Orientation::Vertical,
+            scroll: 0,
+            children: vec![(10, inner_a), (10, inner_b), (10, inner_c)],
+        };
+        reconcile_carousel(&mut node, &[(30, 10), (10, 10), (20, 10)]);
+        let Node::Carousel { children, .. } = &node else { panic!() };
+        assert_eq!(children.len(), 3);
+        // 30 → Tile, 10 → Carousel(scroll=3), 20 → Carousel(scroll=7)
+        assert!(matches!(&children[0].1, Node::Tile(30)));
+        assert!(matches!(&children[1].1, Node::Carousel { id: 10, scroll: 3, .. }));
+        assert!(matches!(&children[2].1, Node::Carousel { id: 20, scroll: 7, .. }));
+    }
+
+    #[test]
+    fn reconcile_carousel_noop_on_non_carousel() {
+        let mut node = h_split(vec![tile(1), tile(2)]);
+        reconcile_carousel(&mut node, &[(99, 10)]); // must not panic or mutate
+        let Node::Split { children, .. } = &node else { panic!() };
+        assert_eq!(children.len(), 2, "split must be unchanged");
+    }
+
+    // ── reconcile_split ───────────────────────────────────────────────────
+
+    #[test]
+    fn reconcile_split_empty_to_desired_populates_in_order() {
+        let mut node = Node::Split {
+            orientation: Orientation::Vertical,
+            children: vec![],
+        };
+        let c_fill = Constraint::new(Size::Fill(1));
+        let c_fixed = Constraint::new(Size::Fixed(10));
+        reconcile_split(&mut node, &[(10, c_fill), (20, c_fixed)]);
+        let Node::Split { children, .. } = &node else { panic!() };
+        assert_eq!(children.len(), 2);
+        assert_eq!(children[0], (c_fill, Node::Tile(10)));
+        assert_eq!(children[1], (c_fixed, Node::Tile(20)));
+    }
+
+    #[test]
+    fn reconcile_split_survivor_keeps_node_constraint_updated() {
+        let inner = Node::Carousel {
+            id: 55,
+            orientation: Orientation::Horizontal,
+            scroll: 4,
+            children: vec![(10, Node::Tile(1))],
+        };
+        let c_old = Constraint::new(Size::Fill(1));
+        let c_new = Constraint::new(Size::Fixed(30));
+        let mut node = Node::Split {
+            orientation: Orientation::Vertical,
+            children: vec![(c_old, inner)],
+        };
+        reconcile_split(&mut node, &[(55, c_new)]);
+        let Node::Split { children, .. } = &node else { panic!() };
+        assert_eq!(children.len(), 1);
+        assert_eq!(children[0].0, c_new, "constraint must be updated");
+        assert!(
+            matches!(&children[0].1, Node::Carousel { id: 55, scroll: 4, .. }),
+            "inner node must be preserved with scroll=4",
+        );
+    }
+
+    #[test]
+    fn reconcile_split_vanished_dropped_new_appended_as_tiles() {
+        let mut node = v_split(vec![tile(1), tile(2), tile(3)]);
+        let c = Constraint::new(Size::Fill(1));
+        reconcile_split(&mut node, &[(1, c), (3, c), (99, c)]);
+        let Node::Split { children, .. } = &node else { panic!() };
+        assert_eq!(children.len(), 3);
+        assert_eq!(tile_id_of(&children[0].1), Some(1));
+        assert_eq!(tile_id_of(&children[1].1), Some(3));
+        assert_eq!(tile_id_of(&children[2].1), Some(99));
+    }
+
+    #[test]
+    fn reconcile_split_permutation_preserves_all_nodes() {
+        let a = Node::Carousel { id: 1, orientation: Orientation::Horizontal, scroll: 2, children: vec![] };
+        let b = Node::Carousel { id: 2, orientation: Orientation::Horizontal, scroll: 5, children: vec![] };
+        let c_con = Constraint::new(Size::Fill(1));
+        let mut node = Node::Split {
+            orientation: Orientation::Horizontal,
+            children: vec![(c_con, a), (c_con, b)],
+        };
+        reconcile_split(&mut node, &[(2, c_con), (1, c_con)]);
+        let Node::Split { children, .. } = &node else { panic!() };
+        assert_eq!(children.len(), 2);
+        assert!(matches!(&children[0].1, Node::Carousel { id: 2, scroll: 5, .. }));
+        assert!(matches!(&children[1].1, Node::Carousel { id: 1, scroll: 2, .. }));
+    }
+
+    #[test]
+    fn reconcile_split_noop_on_non_split() {
+        let mut node = carousel(99, vec![tile(1)]);
+        let c = Constraint::new(Size::Fill(1));
+        reconcile_split(&mut node, &[(10, c)]);
+        let Node::Carousel { children, .. } = &node else { panic!() };
+        assert_eq!(children.len(), 1, "carousel must be unchanged");
     }
 }

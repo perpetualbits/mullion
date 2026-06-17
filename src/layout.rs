@@ -658,6 +658,117 @@ fn min_size_along(children: &[(Constraint, Node)], axis: Axis) -> (u16, u16) {
     }
 }
 
+// ── region_of ────────────────────────────────────────────────────────────────
+
+/// The rect allotted to the node with `id` when `root` is laid out in `area`.
+///
+/// Performs the same descent as [`solve`] but stops and returns the rect as
+/// soon as it reaches the target node.
+///
+/// - For a [`Node::Tile`], returns the exact rect `solve` would assign it.
+/// - For a [`Node::Carousel`], returns its **viewport rect** (the area before
+///   virtualization) — pass this directly to `render_carousel`.
+/// - Returns `None` if `id` is not found, or if the tile is inside a carousel
+///   but currently scrolled out of view.
+///
+/// ## Composition pattern
+///
+/// ```rust
+/// # use mullion::{Node, Rect, layout::{region_of, solve}};
+/// # use mullion::border::render_shared;
+/// # fn demo(mut root: Node, carousel_id: u64, area: Rect) {
+/// // 1. Solve and render the split skeleton.
+/// let rects = solve(&mut root, area);
+/// // 2. Find the carousel's viewport rect.
+/// if let Some(carousel_rect) = region_of(&mut root, area, carousel_id) {
+///     // 3. Feed it to render_carousel.
+///     // render_carousel(buf, &mut root, carousel_rect, &mut |buf, id, rect| { ... });
+/// }
+/// # }
+/// ```
+pub fn region_of(root: &mut Node, area: Rect, id: TileId) -> Option<Rect> {
+    region_of_impl(root, area, id)
+}
+
+/// Recursive descent for [`region_of`].
+///
+/// Mirrors `solve_into` in structure: the same partition / carousel-viewport
+/// logic is used so the returned rect is always consistent with `solve` output.
+fn region_of_impl(node: &mut Node, area: Rect, id: TileId) -> Option<Rect> {
+    match node {
+        Node::Tile(tid) => {
+            if *tid == id { Some(area) } else { None }
+        }
+
+        Node::Split { orientation, children } => {
+            if children.is_empty() {
+                return None;
+            }
+            let axis = orientation.resolve(area);
+            let total = match axis {
+                Axis::Horizontal => area.width,
+                Axis::Vertical => area.height,
+            };
+            let sizes = partition(children, total);
+            let mut pos = match axis {
+                Axis::Horizontal => area.x,
+                Axis::Vertical => area.y,
+            };
+            for ((_, child), &size) in children.iter_mut().zip(sizes.iter()) {
+                let child_area = match axis {
+                    Axis::Horizontal => Rect::new(pos, area.y, size, area.height),
+                    Axis::Vertical   => Rect::new(area.x, pos, area.width, size),
+                };
+                if let Some(rect) = region_of_impl(child, child_area, id) {
+                    return Some(rect);
+                }
+                pos = pos.saturating_add(size);
+            }
+            None
+        }
+
+        Node::Carousel { id: carousel_id, orientation, scroll, children, .. } => {
+            // A Carousel's viewport rect is its full assigned area — hand it
+            // directly to render_carousel.
+            if *carousel_id == id {
+                return Some(area);
+            }
+            if children.is_empty() {
+                return None;
+            }
+            let axis = orientation.resolve(area);
+            let main_extent = match axis {
+                Axis::Horizontal => area.width,
+                Axis::Vertical => area.height,
+            };
+            let extents: Vec<u16> = children.iter().map(|(e, _)| *e).collect();
+            let (clamped, entries) = carousel_visible_entries(&extents, *scroll, main_extent);
+            *scroll = clamped;
+
+            let vp_main_origin = match axis {
+                Axis::Horizontal => area.x,
+                Axis::Vertical => area.y,
+            };
+            for (child_idx, v_start, ext) in entries {
+                // Compute the on-screen clipped rect for this child, matching
+                // solve_into exactly so region_of and solve agree on positions.
+                let vis_start = v_start.max(clamped as u32);
+                let vis_end   = (v_start + ext as u32).min(clamped as u32 + main_extent as u32);
+                let vis_len   = (vis_end - vis_start) as u16;
+                let screen_start = vp_main_origin + (vis_start - clamped as u32) as u16;
+                let child_area = match axis {
+                    Axis::Horizontal => Rect::new(screen_start, area.y, vis_len, area.height),
+                    Axis::Vertical   => Rect::new(area.x, screen_start, area.width, vis_len),
+                };
+                if let Some(rect) = region_of_impl(&mut children[child_idx].1, child_area, id) {
+                    return Some(rect);
+                }
+            }
+            None
+        }
+    }
+}
+
 // ── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -1332,5 +1443,99 @@ mod tests {
             let sum: u16 = tiles.iter().map(|(_, r)| r.width).sum();
             prop_assert!(sum <= total, "sum={} > total={}", sum, total);
         }
+    }
+
+    // ── region_of ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn region_of_tile_matches_solve() {
+        // A simple 2-tile horizontal split in a 40×10 area.
+        // solve gives each tile 20 columns.
+        let area = Rect::new(0, 0, 40, 10);
+        let mut root = Node::Split {
+            orientation: Orientation::Horizontal,
+            children: vec![
+                (Constraint::new(Size::Fill(1)), Node::Tile(1)),
+                (Constraint::new(Size::Fill(1)), Node::Tile(2)),
+            ],
+        };
+        let rects = solve(&mut root, area);
+        let r1 = rects.iter().find(|&&(id, _)| id == 1).map(|&(_, r)| r).unwrap();
+        let r2 = rects.iter().find(|&&(id, _)| id == 2).map(|&(_, r)| r).unwrap();
+
+        let mut root2 = root.clone();
+        assert_eq!(region_of(&mut root2, area, 1), Some(r1));
+
+        let mut root3 = root.clone();
+        assert_eq!(region_of(&mut root3, area, 2), Some(r2));
+    }
+
+    #[test]
+    fn region_of_missing_id_returns_none() {
+        let area = Rect::new(0, 0, 40, 10);
+        let mut root = Node::Tile(1);
+        assert_eq!(region_of(&mut root, area, 999), None);
+    }
+
+    #[test]
+    fn region_of_carousel_returns_its_viewport_rect() {
+        // Carousel occupies the right half of a horizontal split.
+        let area = Rect::new(0, 0, 40, 10);
+        let mut root = Node::Split {
+            orientation: Orientation::Horizontal,
+            children: vec![
+                (Constraint::new(Size::Fill(1)), Node::Tile(1)),
+                (Constraint::new(Size::Fill(1)), Node::Carousel {
+                    id: 42,
+                    orientation: Orientation::Vertical,
+                    scroll: 0,
+                    children: vec![(5, Node::Tile(10)), (5, Node::Tile(11))],
+                }),
+            ],
+        };
+        // The carousel occupies columns 20–39 (right half of a 40-wide area).
+        let expected = Rect::new(20, 0, 20, 10);
+        assert_eq!(region_of(&mut root, area, 42), Some(expected));
+    }
+
+    #[test]
+    fn region_of_tile_inside_carousel_matches_visible_clipped_rect() {
+        // Vertical carousel 10 rows tall, two children of 6 rows each, scroll=0.
+        // Child 0 (id=1): rows 0–5 (clamped to viewport 0–9 → rows 0–5, height 6).
+        // Child 1 (id=2): rows 6–11 (clamped to viewport 0–9 → rows 6–9, height 4).
+        let area = Rect::new(0, 0, 20, 10);
+        let mut root = Node::Carousel {
+            id: 99,
+            orientation: Orientation::Vertical,
+            scroll: 0,
+            children: vec![(6, Node::Tile(1)), (6, Node::Tile(2))],
+        };
+        let rects = solve(&mut root, area);
+        let r1 = rects.iter().find(|&&(id,_)| id==1).map(|&(_,r)| r).unwrap();
+        let r2 = rects.iter().find(|&&(id,_)| id==2).map(|&(_,r)| r).unwrap();
+
+        let mut root2 = root.clone();
+        assert_eq!(region_of(&mut root2, area, 1), Some(r1));
+
+        let mut root3 = root.clone();
+        assert_eq!(region_of(&mut root3, area, 2), Some(r2));
+    }
+
+    #[test]
+    fn region_of_scrolled_out_tile_returns_none() {
+        // Carousel with scroll past child 0 so child 0 is invisible.
+        // Two children of 6 rows each in a 6-row viewport.
+        // scroll=6 → child 1 fills the viewport, child 0 is scrolled off.
+        let area = Rect::new(0, 0, 20, 6);
+        let mut root = Node::Carousel {
+            id: 99,
+            orientation: Orientation::Vertical,
+            scroll: 6,
+            children: vec![(6, Node::Tile(1)), (6, Node::Tile(2))],
+        };
+        // Child 0 (id=1) is fully scrolled off screen.
+        assert_eq!(region_of(&mut root, area, 1), None);
+        // Child 1 (id=2) is visible.
+        assert!(region_of(&mut root, area, 2).is_some());
     }
 }

@@ -183,22 +183,71 @@ rearrange by swapping subtrees, then re-solve. Keep a churning layout stable by
 rebuilding: diff a fresh snapshot into the children, reusing surviving subtrees so
 their focus/scroll/history persist.
 
+Two built-in reconcile helpers cover the two container kinds:
+
 ```rust
-fn reconcile(children: &mut Vec<(Constraint, Node)>, desired: &[(TileId, Constraint)]) {
-    let mut old: std::collections::HashMap<u64, (Constraint, Node)> = children
-        .drain(..).filter_map(|(c, n)| mullion::tree::tile_id_of(&n).map(|id| (id, (c, n)))).collect();
-    for &(id, c) in desired {
-        match old.remove(&id) {
-            Some((_, node)) => children.push((c, node)),         // survivor: keep its state
-            None            => children.push((c, Node::Tile(id))), // newly appeared
-        }
-    } // leftovers in `old` are gone — dropped here
+use mullion::{reconcile_carousel, reconcile_split};
+use mullion::tree::node_by_id_mut;
+
+// `node_by_id_mut` locates the container; then reconcile replaces children.
+if let Some(carousel) = node_by_id_mut(&mut root, CAROUSEL_ID) {
+    reconcile_carousel(carousel, &[
+        (id_a, 6),  // (TileId, main-axis extent in cells)
+        (id_b, 6),
+        (id_c, 6),
+    ]);
 }
+if let Some(sidebar) = node_by_id_mut(&mut root, SIDEBAR_SPLIT_ID) {
+    reconcile_split(sidebar, &[
+        (id_x, Constraint::new(Size::Fixed(10))),
+        (id_y, Constraint::new(Size::Fill(1))),
+    ]);
+}
+// Clean up focus/zoom in case a dropped id was active.
+tree.ensure_focus_valid();
+tree.ensure_zoom_valid();
+```
+
+For each id in `desired`:
+- **Survivor:** the existing node is reused (its scroll offset, nested children,
+  and other state are preserved); only the extent/constraint is updated.
+- **New:** a fresh `Node::Tile(id)` is inserted.
+- **Vanished:** dropped.  `Split`-rooted children (no addressable id) are also
+  dropped — reconcile-managed children must be `Tile`- or `Carousel`-rooted.
+
+The addressable id of any node (complement to `tile_id_of` which is `Tile`-only):
+
+```rust
+use mullion::node_id;
+let id = node_id(&node); // Some(id) for Tile or Carousel; None for Split
 ```
 
 Address a container (a `Carousel`) or tile by id with `node_by_id` /
 `node_by_id_mut`. Unbounded, runtime-populated collections belong in a `Carousel`
 (§3.6); the fixed skeleton stays a `Split`.
+
+**Carousel viewport rect** — for the `render_shared` ↔ `render_carousel`
+composition pattern, use `region_of` to find the rect a carousel (or any node)
+was allotted in the layout:
+
+```rust
+use mullion::layout::{solve, region_of};
+use mullion::render::render_carousel;
+
+let rects = solve(&mut root, area);
+// render_shared into `rects` …
+
+if let Some(carousel_rect) = region_of(&mut root, area, CAROUSEL_ID) {
+    render_carousel(buf, node_by_id_mut(&mut root, CAROUSEL_ID).unwrap(),
+                    carousel_rect, &mut |buf, id, rect| {
+        // paint child `id` into `rect`
+    });
+}
+```
+
+`region_of` returns the full viewport rect for a `Carousel` (pre-virtualization)
+and the exact clipped rect for a `Tile`.  Returns `None` for a missing id or a
+tile that is scrolled off screen.
 
 ### 3.6 Carousels — scrollable groups
 
@@ -359,7 +408,8 @@ Content text passes through unchanged.
 | `backend` | `Backend`, `CrosstermBackend` (`apply_capabilities`, `set_color_depth`, `set_unicode`), `TestBackend` |
 | `terminal` | `Terminal` |
 | `layout` | `solve`, `Node`, `Constraint`, `Size`, `Orientation`, `Axis` |
-| `tree` | `Tree`, `Dir`, `Direction`, `tile_id_of`, `leaves`, `focus_path`, `focus_override`, `node_by_id`/`node_by_id_mut` |
+| `tree` | `Tree`, `Dir`, `Direction`, `tile_id_of`, `node_id`, `leaves`, `focus_path`, `focus_override`, `node_by_id`/`node_by_id_mut`, `reconcile_carousel`, `reconcile_split` |
+| `layout` (module) | `solve`, `region_of`, `min_size` |
 | `render` | `render_carousel` |
 | `border` | `draw_box`, `frame_tiles`, `render_shared`, `BorderStyle`, `Borders`, `LineWeight`, `CornerStyle` |
 | `junction` | `EdgeGrid`, `EdgeCell`, `resolve` |
@@ -375,8 +425,9 @@ Content text passes through unchanged.
 
 Common re-exports at the crate root: `Buffer`, `Cell`, `Node`, `Constraint`,
 `Size`, `Orientation`, `LineWeight`, `Theme`, `Capabilities`, `box_to_ascii`,
-`Color`, `ColorDepth`, `Style`.  Module-scoped: `Axis` (`layout`),
-`Dir`/`Direction` (`tree`).
+`Color`, `ColorDepth`, `Style`, `node_id`, `reconcile_carousel`,
+`reconcile_split`, `region_of`.  Module-scoped: `Axis`, `region_of`, `solve`
+(`layout`); `Dir`/`Direction` (`tree`).
 
 ---
 
@@ -417,8 +468,9 @@ cargo run --example showcase
 | 7b    | Directional focus (`focus_dir`, `focus_dir_cross`), arrow keymap, `Keymap::vim_prefix` |
 | 7c    | `Theme` (named style roles), `ColorDepth`, `Color::downsample` |
 | 7d    | `Capabilities::detect`, `box_to_ascii`, `apply_capabilities`, quickstart example |
+| 8a    | `node_id`, `reconcile_carousel`, `reconcile_split`, `region_of`; §3.5 manual |
 
-**Upcoming:** Phase 8 — apptop integration, `TileContent` trait.
+**Upcoming:** Phase 8b — apptop integration.
 
 See `docs/tiling-engine-roadmap.md` for the full plan and open design questions.
 This manual tracks the public API as each phase merges.
