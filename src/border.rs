@@ -566,6 +566,67 @@ fn deflate(r: Rect) -> Rect {
     )
 }
 
+// ── BorderGap ─────────────────────────────────────────────────────────────────
+
+/// A labelled region carved out of one edge of a border box.
+///
+/// Declare gaps *before* any rim animation so the animation can decide
+/// whether to colour the gap cells or leave them for the caller to fill.
+///
+/// # Three-pass rendering pattern
+///
+/// ```text
+/// 1. Structural pass  — draw corners, side bars, dash fills
+/// 2. Rim-glow pass    — apply animation; cells inside gaps with
+///                        rim_glow = false are skipped entirely
+/// 3. Content pass     — render text / own animation into each gap rect;
+///                        this naturally overrides glow on rim_glow gaps,
+///                        or fills the clean dim cells on non-glow gaps
+/// ```
+///
+/// Setting `rim_glow = true` lets the animation flow through the gap
+/// uninterrupted; content drawn in pass 3 will land on already-coloured
+/// glyphs and can blend or override as it chooses.
+///
+/// Setting `rim_glow = false` (the **default**) keeps these cells dark
+/// and untouched by the animation, giving the gap full colour control.
+pub struct BorderGap {
+    /// The cell rectangle occupied by this gap.
+    ///
+    /// Typically a one-row strip on the top/bottom border edge, or a
+    /// one-column strip on a side.  Whether the `┤`/`├` connector
+    /// characters at each end of the gap are included is up to the
+    /// caller; including them lets the animation colour the connectors,
+    /// excluding them keeps them structurally dim.
+    pub rect: Rect,
+
+    /// `false` (default) — the rim animation skips these cells; the gap
+    /// renders its own colours from scratch in the content pass.
+    ///
+    /// `true` — the rim animation colours these cells like any other
+    /// border cell; the content pass then draws on top of that colour.
+    pub rim_glow: bool,
+}
+
+impl BorderGap {
+    /// Create a gap that opts **out** of rim glow (the common case).
+    pub fn new(rect: Rect) -> Self {
+        Self { rect, rim_glow: false }
+    }
+
+    /// Builder — opt **in** to rim glow.
+    pub fn with_rim_glow(mut self) -> Self {
+        self.rim_glow = true;
+        self
+    }
+
+    /// Returns `true` if the cell at `(x, y)` falls inside this gap's rect.
+    pub fn contains(&self, x: u16, y: u16) -> bool {
+        let r = &self.rect;
+        x >= r.x && x < r.x + r.width && y >= r.y && y < r.y + r.height
+    }
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]

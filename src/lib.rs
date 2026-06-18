@@ -64,7 +64,7 @@ pub mod tree;
 
 pub use backend::{Backend, CrosstermBackend, TestBackend};
 pub use label::{draw_label, label_period, Align, Label, Side};
-pub use border::{draw_box, frame_tiles, render_shared, BorderStyle, Borders, CornerStyle, LineWeight};
+pub use border::{draw_box, frame_tiles, render_shared, BorderGap, BorderStyle, Borders, CornerStyle, LineWeight};
 pub use buffer::{Buffer, Cell};
 pub use geometry::Rect;
 pub use input::{InputRouter, Keymap, KeyCode, KeyEvent, KeyModifiers, KeyOutcome, MouseButton, MouseEvent, MouseEventKind, MouseOutcome, NavCommand};
