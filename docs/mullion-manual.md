@@ -4,10 +4,12 @@
 > mullion resolves it into one rectangle per tile; you paint into those
 > rectangles. A double-buffered `Terminal` diffs and flushes only what changed.
 >
-> **Status:** Phases 0–8b complete — rendering substrate, layout solver, borders +
+> **Status:** Phases 0–8e complete — rendering substrate, layout solver, borders +
 > junctions, focus, input, smooth virtualized carousels, zoom, border labels,
 > mouse, directional navigation, theming, color downsampling, degraded-terminal
-> fallback, dynamic-tree reconcile, and consumer ergonomics helpers.
+> fallback, dynamic-tree reconcile, consumer ergonomics helpers, animation
+> helpers, gap-aware rim animation (`BorderGap`), and declarative column layout
+> (`mullion::table`).
 
 ---
 
@@ -532,6 +534,131 @@ HSV → 24-bit RGB conversion.  `h` wraps automatically; `s` and `v` clamp to
 near 1 for vivid colours and modulate `h` or `v` to produce palette shifts and
 brightness pulses.
 
+### 3.12 Gap-aware border animation — `BorderGap`
+
+`BorderGap` declares a region on a border edge that should be skipped by an
+animated rim effect, so that content drawn there keeps its own colours without
+interference from the animation pass.
+
+```rust
+use mullion::{BorderGap, Rect};
+
+// Default: rim glow skips this region.
+let gap = BorderGap::new(Rect::new(x, y, width, 1));
+
+// Explicit opt-in: rim glow applies to this region too.
+let glow_gap = BorderGap::new(Rect::new(x, y, width, 1)).with_rim_glow();
+```
+
+| Member | Type | Meaning |
+|--------|------|---------|
+| `rect` | `Rect` | The cells covered by this gap |
+| `rim_glow` | `bool` | `false` (default): animation skips these cells; `true`: animation applies |
+
+`gap.contains(x, y)` returns `true` when `(x, y)` is inside `rect`.
+
+**Three-pass render order.** The intended usage is:
+
+1. **Structure** — draw box-drawing characters (corners, dashes, connectors) into the border cells.
+2. **Content** — write gap-specific content (legend text, status, coloured markers).
+3. **Animation** — walk the perimeter CW; for each border cell skip it when `!gap.rim_glow && gap.contains(x, y)`.
+
+Drawing structure first, then content, then the animation pass means the rim
+colour is applied on top of structural dashes but is suppressed inside declared
+gaps, so it never overwrites coloured text.
+
+```rust
+// Typical animation skip in the perimeter loop:
+for &(x, y) in &cells {
+    if gaps.iter().any(|g| !g.rim_glow && g.contains(x, y)) { continue; }
+    // … apply colour …
+}
+```
+
+**Bookend placement.** Structural characters (`┤`, `├`) that bracket a gap
+should lie *outside* the `BorderGap::rect` so they receive the rim colour and
+glow as the animation passes through them.
+
+---
+
+### 3.13 Column layout — `mullion::table`
+
+A declarative column-layout engine backed by `layout::solve`. Declare column
+widths once with `ColumnDef`; resolve them to `Rect`s at render time; use the
+static `write_*` helpers to paint each cell. Eliminates manual width arithmetic
+in data-table views.
+
+```rust
+use mullion::{ColumnDef, ColumnGrid, ColumnKind};
+
+let grid = ColumnGrid::new(vec![
+    ColumnDef::fill(1, ColumnKind::Text).with_min(8).with_max(28),  // label
+    ColumnDef::fixed(1, ColumnKind::Custom),                         // spacer
+    ColumnDef::fixed(9, ColumnKind::Number { unit_cols: 1 }),        // value + unit
+    ColumnDef::fill(2, ColumnKind::Bar),                             // bar
+]);
+```
+
+#### `ColumnKind`
+
+| Variant | Write helper |
+|---------|--------------|
+| `Text` | `write_text` |
+| `Number { unit_cols: u16 }` | `write_number` |
+| `Bar` | `write_bar` |
+| `Custom` | caller writes into the resolved rect directly |
+
+#### `ColumnDef` constructors
+
+| Constructor | Meaning |
+|-------------|---------|
+| `ColumnDef::fixed(n, kind)` | Exactly `n` cells wide |
+| `ColumnDef::fill(weight, kind)` | Shares leftover space by weight (`Size::Fill`) |
+| `ColumnDef::percent(p, kind)` | `p`% of the available width |
+
+All three support `.with_min(n)` / `.with_max(n)` clamps and `.with_align(Align)`.
+
+#### Resolving
+
+```rust
+// In your render function, resolve once per frame (or when the area changes):
+let col_rects: Vec<Rect> = grid.resolve(area);
+
+// Convenience: resolve for a single data row at y:
+let row_rects: Vec<Rect> = grid.row_rects(area, y);
+```
+
+`resolve` runs `layout::solve` internally. Fixed columns are satisfied first,
+then percent, then fill columns share the remainder proportionally — identical
+to tile layout.
+
+#### Write helpers (static methods on `ColumnGrid`)
+
+```rust
+// Text with alignment and `…` truncation (Align::Start / Center / End):
+ColumnGrid::write_text(buf, col_rects[0], y, "hostname-001", Align::End, style);
+
+// Number + unit: rightmost `unit_cols` cells hold the unit, rest hold the
+// right-aligned value string.  Both portions carry independent styles.
+ColumnGrid::write_number(buf, col_rects[2], y, "42.3", val_style, "%", unit_style, 1);
+
+// Horizontal fill bar (fraction ∈ [0, 1]):
+ColumnGrid::write_bar(buf, col_rects[3], y, 0.67,
+    '█', filled_style, '░', empty_style, None);
+
+// Bar with per-cell overlay (e.g. histogram dots):
+ColumnGrid::write_bar(buf, col_rects[3], y, 0.67,
+    '█', filled_style, '░', empty_style,
+    Some(&|col_idx| {
+        let frac = col_idx as f32 / col_rects[3].width as f32;
+        Some(('◻', Style::default().fg(planck_color(frac))))
+    }));
+```
+
+The `overlay` closure receives the cell index (0 = leftmost) and returns an
+optional `(char, Style)` drawn on top; the bar fill is always painted first so
+the overlay is always visible.
+
 ---
 
 ## 4. API reference by module
@@ -551,7 +678,8 @@ brightness pulses.
 | `tree` | `Tree`, `Dir`, `Direction`, `tile_id_of`, `node_id`, `id_from_key`, `leaves`, `focus_path`, `focus_override`, `node_by_id`/`node_by_id_mut`, `reconcile_carousel`, `reconcile_split` |
 | `layout` (module) | `solve`, `region_of`, `carousel_visible_range`, `min_size` |
 | `render` | `render_carousel` |
-| `border` | `draw_box`, `frame_tiles`, `render_shared`, `BorderStyle`, `Borders`, `LineWeight`, `CornerStyle` |
+| `border` | `draw_box`, `frame_tiles`, `render_shared`, `BorderStyle`, `Borders`, `LineWeight`, `CornerStyle`, `BorderGap` |
+| `table` | `ColumnGrid` (`resolve`, `row_rects`, `write_text`, `write_number`, `write_bar`), `ColumnDef`, `ColumnKind` |
 | `junction` | `EdgeGrid`, `EdgeCell`, `resolve` |
 | `label` | `draw_label`, `label_period`, `Label`, `Side`, `Align` |
 | `input` | `InputRouter`, `KeyOutcome`, `NavCommand`, `Keymap`, `MouseOutcome` (+ re-exported `KeyEvent`/`KeyCode`/`KeyModifiers`, `MouseEvent`/`MouseEventKind`/`MouseButton`) |
@@ -567,7 +695,8 @@ brightness pulses.
 Common re-exports at the crate root: `Buffer`, `Cell`, `Node`, `Constraint`,
 `Size`, `Orientation`, `LineWeight`, `Theme`, `Capabilities`, `box_to_ascii`,
 `Color`, `ColorDepth`, `Style`, `node_id`, `id_from_key`, `reconcile_carousel`,
-`reconcile_split`, `region_of`, `carousel_visible_range`.  Module-scoped:
+`reconcile_split`, `region_of`, `carousel_visible_range`, `BorderGap`,
+`ColumnDef`, `ColumnGrid`, `ColumnKind`.  Module-scoped:
 `Axis`, `region_of`, `carousel_visible_range`, `solve` (`layout`);
 `Dir`/`Direction` (`tree`).
 
@@ -850,8 +979,10 @@ cargo run --release --example spiral_stress --swarm  # swarm + zoom
 | 8a    | `node_id`, `reconcile_carousel`, `reconcile_split`, `region_of`; §3.5 manual |
 | 8b    | `carousel_visible_range`, `with_effective_root_mut`, `id_from_key`, `effective_root_id`; §3.5–3.7 manual |
 | 8c    | Animation helpers: `ease` module (`smoothstep`, `lerp`, `gaussian`), `Rect::border_pos`/`border_len`, `Color::from_hsv`; §3.11 manual |
+| 8d    | `BorderGap` — gap-aware rim animation with `rim_glow` flag, three-pass render pattern; §3.12 manual |
+| 8e    | `mullion::table` — `ColumnGrid`, `ColumnDef`, `ColumnKind`, `write_text`/`write_number`/`write_bar`; §3.13 manual |
 
-**Upcoming:** Phase 9 — aerie integration.
+**Upcoming:** Phase 9 — multi-pane drill-down, mouse selection.
 
 See `docs/tiling-engine-roadmap.md` for the full plan and open design questions.
 This manual tracks the public API as each phase merges.
