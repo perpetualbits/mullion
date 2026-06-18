@@ -45,6 +45,7 @@
 
 pub mod backend;
 pub mod border;
+pub mod table;
 pub mod buffer;
 pub mod capabilities;
 pub mod charset;
@@ -72,6 +73,7 @@ pub use layout::{carousel_visible_range, region_of, Constraint, Node, Orientatio
 pub use capabilities::Capabilities;
 pub use charset::box_to_ascii;
 pub use ease::{gaussian, lerp, smoothstep};
+pub use table::{ColumnDef, ColumnGrid, ColumnKind};
 pub use style::{Color, ColorDepth, Modifier, Style};
 pub use theme::Theme;
 pub use terminal::{poll_event, read_event, Terminal};

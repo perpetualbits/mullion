@@ -106,14 +106,15 @@ pub fn render_carousel(
     // Blit the viewport window from temp into buf.
     // scroll_in_temp: offset within temp where the visible window starts.
     let scroll_in_temp = (clamped as u32 - first_v) as u16; // safe: first_v <= clamped
-    debug_assert!(
-        scroll_in_temp as u32 + main_extent as u32 <= temp_main as u32,
-        "blit window must fit within temp (scroll_in_temp={scroll_in_temp}, \
-         main_extent={main_extent}, temp_main={temp_main})"
-    );
+    // When content is shorter than the viewport, temp_main < main_extent; only
+    // blit the rows that exist — the remainder of the viewport is left as-is.
+    let blit_main = main_extent.min(temp_main.saturating_sub(scroll_in_temp));
+    if blit_main == 0 {
+        return;
+    }
     let (src_x, src_y, src_w, src_h) = match axis {
-        Axis::Horizontal => (scroll_in_temp, 0u16, main_extent, cross_extent),
-        Axis::Vertical   => (0u16, scroll_in_temp, cross_extent, main_extent),
+        Axis::Horizontal => (scroll_in_temp, 0u16, blit_main, cross_extent),
+        Axis::Vertical   => (0u16, scroll_in_temp, cross_extent, blit_main),
     };
     buf.blit(&temp, Rect::new(src_x, src_y, src_w, src_h), viewport.x, viewport.y);
 }
