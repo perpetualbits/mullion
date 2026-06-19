@@ -8,8 +8,8 @@
 > junctions, focus, input, smooth virtualized carousels, zoom, border labels,
 > mouse, directional navigation, theming, color downsampling, degraded-terminal
 > fallback, dynamic-tree reconcile, consumer ergonomics helpers, animation
-> helpers, gap-aware rim animation (`BorderGap`), and declarative column layout
-> (`mullion::table`).
+> helpers, gap-aware rim animation (`BorderGap`), declarative column layout
+> (`mullion::table`), and the `Table` widget (header + carousel body + footer).
 
 ---
 
@@ -661,6 +661,81 @@ the overlay is always visible.
 
 ---
 
+### 3.14 `Table` — header + scrollable body + footer
+
+`Table` composes `ColumnGrid` and `render_carousel` into a single call. All
+three closures — header, body row, footer — receive the same resolved column
+rects, so alignment across fixed chrome and the scrollable body is guaranteed
+without any manual coordinate arithmetic.
+
+```rust
+use mullion::{Buffer, Rect, Table};
+use mullion::table::{ColumnDef, ColumnGrid, ColumnKind};
+use mullion::layout::Node;
+
+let grid = ColumnGrid::new(vec![
+    ColumnDef::fill(1, ColumnKind::Text).with_min(8).with_max(28),
+    ColumnDef::fixed(9, ColumnKind::Number { unit_cols: 1 }),
+    ColumnDef::fill(2, ColumnKind::Bar),
+]);
+let table = Table::new(grid);
+```
+
+#### Scroll setup before rendering
+
+`table.body_area` returns the rect the carousel will occupy (area minus the
+header and/or footer rows). Feed it to `scroll_focus_into_view` before calling
+`render`:
+
+```rust
+tree.scroll_focus_into_view(table.body_area(area, true, false)); // has header, no footer
+```
+
+#### Rendering
+
+```rust
+table.render(
+    buf, area, carousel_node,
+    Some(|buf: &mut Buffer, cols: &[Rect]| {
+        // draw the header row — cols[n].y is the header y
+        ColumnGrid::write_text(buf, cols[0], cols[0].y, "name",  Align::Start, dim);
+        ColumnGrid::write_text(buf, cols[1], cols[1].y, "value", Align::End,   dim);
+        ColumnGrid::write_text(buf, cols[2], cols[2].y, "graph", Align::Start, dim);
+    }),
+    Some(|buf: &mut Buffer, cols: &[Rect]| {
+        // draw the footer row — cols[n].y is the footer y
+        ColumnGrid::write_text(buf, cols[0], cols[0].y, "42 items", Align::Start, dim);
+    }),
+    |buf: &mut Buffer, id: u64, cols: &[Rect]| {
+        // draw one carousel row — cols[n].y is this entry's y
+        ColumnGrid::write_text  (buf, cols[0], cols[0].y, &name,  Align::Start, style);
+        ColumnGrid::write_number(buf, cols[1], cols[1].y, &value, style, "%", dim, 1);
+        ColumnGrid::write_bar   (buf, cols[2], cols[2].y, fraction, '█', style, '░', dim, None);
+    },
+);
+```
+
+Pass `None::<fn(&mut Buffer, &[Rect])>` for any closure you don't need.
+
+**How it works.** Column widths are resolved once from `area.width` (y is
+irrelevant for column layout). The header closure is given rects at `area.y`;
+the footer closure is given rects at `area.y + area.height - 1`; the row
+closure is given rects re-positioned at each carousel entry's `y` by
+`render_carousel`. Header and footer each consume one row; the remainder is the
+carousel body. If both are absent the entire area is the carousel.
+
+**`bar_w` pattern.** When a `Bar` column's pixel width is needed outside the
+closures (e.g. to pre-compute histogram bins), resolve the grid before moving it
+into `Table::new`:
+
+```rust
+let grid  = ColumnGrid::new(vec![ /* … */ ]);
+let bar_w = grid.resolve(Rect::new(area.x, 0, area.width, 1))[bar_col_idx].width as usize;
+let table = Table::new(grid);   // grid moved here; bar_w already captured
+```
+
+---
+
 ## 4. API reference by module
 
 | Module | Key items |
@@ -679,7 +754,7 @@ the overlay is always visible.
 | `layout` (module) | `solve`, `region_of`, `carousel_visible_range`, `min_size` |
 | `render` | `render_carousel` |
 | `border` | `draw_box`, `frame_tiles`, `render_shared`, `BorderStyle`, `Borders`, `LineWeight`, `CornerStyle`, `BorderGap` |
-| `table` | `ColumnGrid` (`resolve`, `row_rects`, `write_text`, `write_number`, `write_bar`), `ColumnDef`, `ColumnKind` |
+| `table` | `ColumnGrid` (`resolve`, `row_rects`, `write_text`, `write_number`, `write_bar`), `ColumnDef`, `ColumnKind`, `Table` (`new`, `body_area`, `render`) |
 | `junction` | `EdgeGrid`, `EdgeCell`, `resolve` |
 | `label` | `draw_label`, `label_period`, `Label`, `Side`, `Align` |
 | `input` | `InputRouter`, `KeyOutcome`, `NavCommand`, `Keymap`, `MouseOutcome` (+ re-exported `KeyEvent`/`KeyCode`/`KeyModifiers`, `MouseEvent`/`MouseEventKind`/`MouseButton`) |
@@ -696,7 +771,7 @@ Common re-exports at the crate root: `Buffer`, `Cell`, `Node`, `Constraint`,
 `Size`, `Orientation`, `LineWeight`, `Theme`, `Capabilities`, `box_to_ascii`,
 `Color`, `ColorDepth`, `Style`, `node_id`, `id_from_key`, `reconcile_carousel`,
 `reconcile_split`, `region_of`, `carousel_visible_range`, `BorderGap`,
-`ColumnDef`, `ColumnGrid`, `ColumnKind`.  Module-scoped:
+`ColumnDef`, `ColumnGrid`, `ColumnKind`, `Table`.  Module-scoped:
 `Axis`, `region_of`, `carousel_visible_range`, `solve` (`layout`);
 `Dir`/`Direction` (`tree`).
 
@@ -981,6 +1056,7 @@ cargo run --release --example spiral_stress --swarm  # swarm + zoom
 | 8c    | Animation helpers: `ease` module (`smoothstep`, `lerp`, `gaussian`), `Rect::border_pos`/`border_len`, `Color::from_hsv`; §3.11 manual |
 | 8d    | `BorderGap` — gap-aware rim animation with `rim_glow` flag, three-pass render pattern; §3.12 manual |
 | 8e    | `mullion::table` — `ColumnGrid`, `ColumnDef`, `ColumnKind`, `write_text`/`write_number`/`write_bar`; §3.13 manual |
+| 8f    | `Table` — header + carousel body + footer with shared column rects; `body_area` helper; §3.14 manual |
 
 **Upcoming:** Phase 9 — multi-pane drill-down, mouse selection.
 
