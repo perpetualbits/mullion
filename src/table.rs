@@ -43,6 +43,8 @@ use crate::buffer::Buffer;
 use crate::geometry::Rect;
 use crate::label::Align;
 use crate::layout::{Constraint, Node, Orientation, Size};
+use crate::layout::TileId;
+use crate::render::render_carousel;
 use crate::style::Style;
 
 // ── ColumnKind ────────────────────────────────────────────────────────────────
@@ -350,6 +352,137 @@ impl ColumnGrid {
                 }
             }
         }
+    }
+}
+
+// ── Table ─────────────────────────────────────────────────────────────────────
+
+/// A structured table: an optional fixed header row, a scrollable carousel body,
+/// and an optional fixed footer row — all sharing the same column widths.
+///
+/// Column widths are resolved once from the available area and passed to every
+/// closure as a `&[Rect]` slice, so header, body, and footer columns are
+/// guaranteed to align perfectly without any manual coordinate arithmetic.
+///
+/// # Usage
+///
+/// ```no_run
+/// use mullion::{Buffer, Rect, Table};
+/// use mullion::table::{ColumnDef, ColumnGrid, ColumnKind};
+/// use mullion::layout::Node;
+/// use mullion::style::Style;
+///
+/// # let mut buf = Buffer::empty(Rect::new(0, 0, 80, 24));
+/// # let area = Rect::new(0, 0, 80, 24);
+/// # let mut carousel = Node::Carousel { id: 0, orientation: mullion::layout::Orientation::Vertical, scroll: 0, children: vec![] };
+/// # let dim = Style::default();
+/// let grid = ColumnGrid::new(vec![
+///     ColumnDef::fill(1, ColumnKind::Text).with_min(8).with_max(28),
+///     ColumnDef::fixed(9, ColumnKind::Number { unit_cols: 1 }),
+///     ColumnDef::fill(2, ColumnKind::Bar),
+/// ]);
+/// let table = Table::new(grid);
+///
+/// // Before rendering, use body_area to call scroll_focus_into_view:
+/// // tree.scroll_focus_into_view(table.body_area(area, true, false));
+///
+/// table.render(&mut buf, area, &mut carousel,
+///     Some(|buf: &mut Buffer, cols: &[Rect]| {
+///         // draw header using cols[0], cols[1], cols[2] …
+///     }),
+///     None::<fn(&mut Buffer, &[Rect])>,
+///     |buf: &mut Buffer, id: u64, cols: &[Rect]| {
+///         // draw one data row
+///     },
+/// );
+/// ```
+pub struct Table {
+    grid: ColumnGrid,
+}
+
+impl Table {
+    /// Create a new `Table` with the given column layout.
+    pub fn new(grid: ColumnGrid) -> Self {
+        Self { grid }
+    }
+
+    /// The rect the carousel body will occupy given the presence of a header/footer.
+    ///
+    /// Call this before `render` to feed `tree.scroll_focus_into_view` the
+    /// correct carousel rect:
+    ///
+    /// ```no_run
+    /// # use mullion::{Table, Rect};
+    /// # use mullion::table::{ColumnGrid, ColumnDef, ColumnKind};
+    /// # let table = Table::new(ColumnGrid::new(vec![]));
+    /// # let area = Rect::new(0, 0, 80, 24);
+    /// # let mut tree = mullion::tree::Tree::new(mullion::layout::Node::Tile(0));
+    /// tree.scroll_focus_into_view(table.body_area(area, true, false));
+    /// ```
+    pub fn body_area(&self, area: Rect, has_header: bool, has_footer: bool) -> Rect {
+        let top = area.y + if has_header { 1 } else { 0 };
+        let trim = if has_header { 1u16 } else { 0 } + if has_footer { 1u16 } else { 0 };
+        Rect::new(area.x, top, area.width, area.height.saturating_sub(trim))
+    }
+
+    /// Render the table into `area`.
+    ///
+    /// - `header` — if `Some`, draws one fixed row at the top of `area`.
+    /// - `footer` — if `Some`, draws one fixed row at the bottom of `area`.
+    /// - `row` — called by [`render_carousel`] for each visible entry; receives
+    ///   the `TileId` and column rects already positioned at that entry's `y`.
+    /// - `carousel` — the [`Node::Carousel`] that supplies the scrollable body.
+    ///
+    /// All closures receive the same resolved column x-positions and widths,
+    /// guaranteeing alignment across header, body, and footer.
+    pub fn render<H, F, R>(
+        &self,
+        buf:      &mut Buffer,
+        area:     Rect,
+        carousel: &mut Node,
+        mut header: Option<H>,
+        mut footer: Option<F>,
+        mut row:    R,
+    ) where
+        H: FnMut(&mut Buffer, &[Rect]),
+        F: FnMut(&mut Buffer, &[Rect]),
+        R: FnMut(&mut Buffer, TileId, &[Rect]),
+    {
+        if area.height == 0 { return; }
+
+        // Resolve x-positions and widths once; y is irrelevant for column layout.
+        let widths: Vec<(u16, u16)> = self.grid
+            .resolve(Rect::new(area.x, 0, area.width, 1))
+            .into_iter()
+            .map(|r| (r.x, r.width))
+            .collect();
+
+        let rects_at = |y: u16| -> Vec<Rect> {
+            widths.iter().map(|&(x, w)| Rect::new(x, y, w, 1)).collect()
+        };
+
+        let mut top = area.y;
+        let mut bot = area.y + area.height;
+
+        if let Some(ref mut h) = header {
+            if top < bot {
+                h(buf, &rects_at(top));
+                top += 1;
+            }
+        }
+        if let Some(ref mut f) = footer {
+            if top < bot {
+                bot -= 1;
+                f(buf, &rects_at(bot));
+            }
+        }
+
+        let body = Rect::new(area.x, top, area.width, bot.saturating_sub(top));
+        if body.height == 0 { return; }
+
+        render_carousel(buf, carousel, body, &mut |buf, id, rect| {
+            row(buf, id, &rects_at(rect.y));
+        });
     }
 }
 
