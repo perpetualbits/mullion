@@ -853,6 +853,32 @@ engine (§3.16). `line_count_hint` returns `(indexed_so_far, complete)`, which
 drives an estimate-until-fully-indexed scrollbar (reusing the §3.17
 `render_scrollbar`). Demo: `cargo run --example document`.
 
+### 3.19 Runaround — `mullion::runaround`
+
+Flow text *around* floating tiles (§3.15) by treating the free space as a stream
+of slots (§3.5). For each visible row, subtracting the tiles (plus gutter) leaves
+1..n free intervals — "left of tile", "right of tile", or both; flattened
+top-to-bottom they form an ordered slot stream, and wrapped tokens flow into
+slots instead of full-width lines.
+
+```rust
+use mullion::{Rect, runaround::{flow, render_flow}};
+use mullion::text::BaseDirection;
+
+let parent = Rect::new(0, 1, 60, 20);
+let figure = Rect::new(24, 4, 14, 6);              // a floating tile to read around
+let placed = flow(text, parent, &[figure], 1 /* gutter */, BaseDirection::Ltr,
+                  parent.y..parent.bottom());      // viewport-bounded by the rows
+render_flow(buf, &placed, style);                  // draw the figure on top
+```
+
+The obstacle-free case is one full-width slot per row, which flows through the
+**same** `wrap_into_slots` path as flat wrapping — so `flow` with no obstacles
+reproduces `wrap` (§3.16) line for line. Reflow on a tile drag is bounded by the
+rows you pass, not the whole document. Under an **RTL** base the within-row slot
+order flips (the right-of-tile slot fills first) — the §3.5 BiDi × runaround
+hazard, handled explicitly. Demo: `cargo run --example runaround`.
+
 ---
 
 ## 4. API reference by module
@@ -875,10 +901,11 @@ drives an estimate-until-fully-indexed scrollbar (reusing the §3.17
 | `border` | `draw_box`, `frame_tiles`, `render_shared`, `BorderStyle`, `Borders`, `LineWeight`, `CornerStyle`, `BorderGap` |
 | `table` | `ColumnGrid` (`resolve`, `row_rects`, `write_text`, `write_number`, `write_bar`), `ColumnDef`, `ColumnKind`, `Table` (`new`, `body_area`, `render`) |
 | `float` | `FloatLayer` (`with_child`, `solve`), `FloatChild`, `FloatRect`, `FreeInterval`, `free_intervals_in_rows`, `free_cells_in_window` |
-| `text` | `wrap`, `shape_line`, `render_wrapped`, `render_line`, `WrappedText` (`lines`, `visible`, `page`, `page_count`), `VisualLine`, `VisualCell`, `CursorMap` (`visual_to_logical`, `logical_to_visual`), `BaseDirection` |
+| `text` | `wrap`, `wrap_into_slots`, `shape_line`, `render_wrapped`, `render_line`, `WrappedText` (`lines`, `visible`, `page`, `page_count`), `VisualLine`, `VisualCell`, `CursorMap` (`visual_to_logical`, `logical_to_visual`), `BaseDirection` |
 | `record` | `RecordSource` (`key_of`, `fetch_after`, `fetch_before`, `approx_position`, `exact_len`), `Window`, `VecRecordSource` (`new`, `estimated`) |
 | `vlist` | `VirtualList` (`visible`, `scroll_by`, `set_viewport`, `scroll_metrics`, `at_top`/`at_bottom`, `capacity`), `ScrollMetrics`, `render_scrollbar` |
 | `docview` | `DocView` (`new`, `set_width`, `scroll_by`, `scroll_to_line`, `seek_to_byte`, `line_to_byte`, `byte_to_line`, `total_lines`, `line_count_hint`, `visible_lines`), `render_doc` |
+| `runaround` | `flow`, `slots_in`, `render_flow`, `Slot`, `PlacedLine` |
 | `junction` | `EdgeGrid`, `EdgeCell`, `resolve` |
 | `label` | `draw_label`, `label_period`, `Label`, `Side`, `Align` |
 | `input` | `InputRouter`, `KeyOutcome`, `NavCommand`, `Keymap`, `MouseOutcome` (+ re-exported `KeyEvent`/`KeyCode`/`KeyModifiers`, `MouseEvent`/`MouseEventKind`/`MouseButton`) |
@@ -898,7 +925,8 @@ Common re-exports at the crate root: `Buffer`, `Cell`, `Node`, `Constraint`,
 `ColumnDef`, `ColumnGrid`, `ColumnKind`, `Table`, `FloatLayer`, `FloatChild`,
 `FloatRect`, `FreeInterval`, `wrap`, `shape_line`, `WrappedText`, `VisualLine`,
 `CursorMap`, `BaseDirection`, `RecordSource`, `VecRecordSource`, `Window`,
-`VirtualList`, `ScrollMetrics`, `render_scrollbar`, `DocView`, `render_doc`.
+`VirtualList`, `ScrollMetrics`, `render_scrollbar`, `DocView`, `render_doc`,
+`wrap_into_slots`, `flow`, `slots_in`, `render_flow`, `Slot`, `PlacedLine`.
 Module-scoped:
 `Axis`, `region_of`, `carousel_visible_range`, `solve` (`layout`);
 `Dir`/`Direction` (`tree`).
@@ -1180,6 +1208,15 @@ position).
 cargo run --example document
 ```
 
+**`examples/runaround.rs`** — the §3.19 runaround: a paragraph flows around a
+movable floating figure. Move the figure (`hjkl`/arrows) and the visible rows
+reflow; `[`/`]` change the gutter; `d` flips LTR ↔ RTL to show the within-row
+slot-order flip.
+
+```text
+cargo run --example runaround
+```
+
 **`examples/spiral_stress.rs`** (in the `aerie` crate) — an animated stress test
 and visual demo.  Draws a stack of nested frames arranged like a Fibonacci /
 golden-rectangle spiral that continuously uncurls and re-curls the other way
@@ -1231,10 +1268,11 @@ text engine, and node graphs on top of the tiling core):
 | 2     | `mullion::text` — bidi-aware wrapping, logical↔visual `CursorMap`, pagination/scrolling, `shape_line`; §3.16 manual |
 | 3     | `mullion::vlist` — row virtualization over `RecordSource`, exact/estimate scrollbar; `VecRecordSource`; §3.17 manual |
 | 4     | `mullion::docview` — wrapped-line virtualization, lazy byte→line index, width-change invalidation; §3.18 manual |
+| 5     | `mullion::runaround` — slot-stream flow around floating tiles (`wrap_into_slots`, `flow`); LTR then BiDi × runaround; §3.19 manual |
 
-**Upcoming (capability layer):** Phase 5 — runaround (slot-stream flow around
-floating tiles), the first time §3.15 and §3.16 combine; landed in two stages
-(LTR runaround, then BiDi × runaround).
+**Upcoming (capability layer):** Phase 6 — sockets / ports: lift the gap-interval
+geometry and streaming-gradient kernels from the `spiral_stress` "surf field" into
+a real `BorderGap`-with-semantics socket API, the start of the node-graph track.
 
 See `docs/tiling-engine-roadmap.md` and `docs/mullion-design-note.md` for the full
 plans and open design questions. This manual tracks the public API as each phase
