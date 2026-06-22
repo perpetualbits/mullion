@@ -894,6 +894,50 @@ nowhere whole). The obstacle-free case has all slots the same width, so this
 collapses back to ordinary greedy wrapping. Demos: `cargo run --example runaround`
 (single tile) and `cargo run --example runaround_multi` (three tiles, mixed LTR/RTL).
 
+### 3.20 Sockets — `mullion::socket`
+
+A `Socket` is a `BorderGap` (§3.12) **with semantics**: a `(side, offset, flow,
+kind)` tuple naming where a connector attaches to a tile's border (§5.1). The hard
+part — placing and sizing edge gaps correctly at every box size — is the
+gap-interval geometry proven in the `spiral_stress` "surf field", lifted here.
+
+A socket renders as a **bookended gap** carved into the border, with a circle
+terminal floating in the opening — `┤○ ├` along a horizontal edge, `┴●┬` stacked
+along a vertical one. `●` marks a connected socket, `○` an idle one; the round
+glyph never has to meet a line, and the border is capped by [`bookends`] on each
+side of it.
+
+```rust
+use mullion::{Rect, label::Side};
+use mullion::socket::{Socket, Flow, draw_socket, FlowStyle};
+
+let node = Rect::new(0, 0, 24, 12);
+let s = Socket::new(Side::Left, /* offset */ 4, Flow::In, /* kind */ 0);
+draw_socket(buf, node, &s, /* connected */ true, style); // ┴●┬ in the left edge
+let anchor = s.anchor(node);    // the cell a connector attaches to (routing)
+// A single typed output socket, and an evenly-spaced, non-overlapping set:
+let out = Socket::new(Side::Right, 4, Flow::Out, /* kind */ 7);
+let ins = Socket::pack(Side::Left, 3, node.height);
+```
+
+`gap` clamps the opening to the edge interior so a socket never lands on a corner,
+and returns `None` if it does not fit; `pack` distributes `count` unit sockets
+without overlap. `kind` is an opaque type tag (mullion attaches no meaning — a
+consuming app decides which sockets may connect).
+
+The optional **connector-flow gradient** streams a hue along a gap or connector to
+show flow direction or activity (lifted from the surf field's `stream_color`):
+
+```rust
+let fs = FlowStyle { band: 0, direction: 1.0, ..FlowStyle::default() };
+let style = fs.color(/* pos 0..1 */ 0.3, /* time */ t, /* active */ true);
+```
+
+It is a pure function of position and time — sockets are pinned, so nothing moves
+unless the caller advances `t`. The surf field's autonomous drift/pulse/split-merge
+is intentionally not lifted. In the demo, a connected socket's circle is recoloured
+with this gradient so it pulses with live flow. Demo: `cargo run --example sockets`.
+
 ---
 
 ## 4. API reference by module
@@ -921,6 +965,7 @@ collapses back to ordinary greedy wrapping. Demos: `cargo run --example runaroun
 | `vlist` | `VirtualList` (`visible`, `scroll_by`, `set_viewport`, `scroll_metrics`, `at_top`/`at_bottom`, `capacity`), `ScrollMetrics`, `render_scrollbar` |
 | `docview` | `DocView` (`new`, `set_width`, `scroll_by`, `scroll_to_line`, `seek_to_byte`, `line_to_byte`, `byte_to_line`, `total_lines`, `line_count_hint`, `visible_lines`), `render_doc` |
 | `runaround` | `flow`, `slots_in`, `render_flow`, `Slot`, `PlacedLine` |
+| `socket` | `Socket` (`new`, `with_length`, `gap`, `rect`, `anchor`, `pack`), `Flow`, `bookends`, `draw_socket`, `FlowStyle` (`color`) |
 | `junction` | `EdgeGrid`, `EdgeCell`, `resolve` |
 | `label` | `draw_label`, `label_period`, `Label`, `Side`, `Align` |
 | `input` | `InputRouter`, `KeyOutcome`, `NavCommand`, `Keymap`, `MouseOutcome` (+ re-exported `KeyEvent`/`KeyCode`/`KeyModifiers`, `MouseEvent`/`MouseEventKind`/`MouseButton`) |
@@ -941,7 +986,8 @@ Common re-exports at the crate root: `Buffer`, `Cell`, `Node`, `Constraint`,
 `FloatRect`, `FreeInterval`, `wrap`, `shape_line`, `WrappedText`, `VisualLine`,
 `CursorMap`, `BaseDirection`, `RecordSource`, `VecRecordSource`, `Window`,
 `VirtualList`, `ScrollMetrics`, `render_scrollbar`, `DocView`, `render_doc`,
-`wrap_into_slots`, `flow`, `slots_in`, `render_flow`, `Slot`, `PlacedLine`.
+`wrap_into_slots`, `flow`, `slots_in`, `render_flow`, `Slot`, `PlacedLine`,
+`Socket`, `Flow`, `FlowStyle`, `draw_socket`, `bookends`.
 Module-scoped:
 `Axis`, `region_of`, `carousel_visible_range`, `solve` (`layout`);
 `Dir`/`Direction` (`tree`).
@@ -1242,6 +1288,15 @@ words-kept-whole flow (§3.19).
 cargo run --example runaround_multi
 ```
 
+**`examples/sockets.rs`** — the §3.20 sockets: a node with input sockets down its
+left edge and outputs down its right, each a bookended gap in the border (`┴●┬`)
+with a circle terminal — `●` connected (the circle pulses with the flow gradient),
+`○` idle. `↑`/`↓` change the socket count; `space` pauses (and toggles the look).
+
+```text
+cargo run --example sockets
+```
+
 **`examples/spiral_stress.rs`** (in the `aerie` crate) — an animated stress test
 and visual demo.  Draws a stack of nested frames arranged like a Fibonacci /
 golden-rectangle spiral that continuously uncurls and re-curls the other way
@@ -1294,10 +1349,12 @@ text engine, and node graphs on top of the tiling core):
 | 3     | `mullion::vlist` — row virtualization over `RecordSource`, exact/estimate scrollbar; `VecRecordSource`; §3.17 manual |
 | 4     | `mullion::docview` — wrapped-line virtualization, lazy byte→line index, width-change invalidation; §3.18 manual |
 | 5     | `mullion::runaround` — slot-stream flow around floating tiles (`wrap_into_slots`, `flow`); LTR then BiDi × runaround; §3.19 manual |
+| 6     | `mullion::socket` — `Socket` (`BorderGap` with semantics), gap geometry + `pack`, `FlowStyle` connector-flow gradient; §3.20 manual |
 
-**Upcoming (capability layer):** Phase 6 — sockets / ports: lift the gap-interval
-geometry and streaming-gradient kernels from the `spiral_stress` "surf field" into
-a real `BorderGap`-with-semantics socket API, the start of the node-graph track.
+**Upcoming (capability layer):** Phase 7 — manual node placement: a graph canvas
+whose floating children are nodes, positioned by mouse drag and keyboard nudge
+(building on the floating-tile foundation), with the §3.20 sockets placeable on
+them.
 
 See `docs/tiling-engine-roadmap.md` and `docs/mullion-design-note.md` for the full
 plans and open design questions. This manual tracks the public API as each phase
