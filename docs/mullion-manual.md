@@ -1019,6 +1019,42 @@ by **colour-per-net**: `render` takes a `styles` slice (one per connector) and a
 hue. Demo: `cargo run --example wires` (drag a node and the coloured wires reroute
 and re-nudge live).
 
+### 3.23 Graph viewport — `mullion::graph::Viewport`
+
+A `Viewport` is a window onto a **canvas larger than the screen** (design note
+§5.7): a `(dx, dy)` pan offset plus the on-screen window rect. The canvas cell at
+`pan` is shown at the window's top-left, so panning slides the window over the
+canvas — by keyboard, mouse drag, or wheel, in all four directions.
+
+```rust
+use mullion::{Rect, Viewport};
+
+let mut vp = Viewport::new(window, /* canvas */ 140, 44);
+vp.pan_by(2, 0);                       // pan right (clamped to the canvas)
+
+for (id, crect) in &node_canvas_rects {
+    if let Some(screen) = vp.project(*crect) {   // canvas → screen, clipped; None = culled
+        draw_box(buf, screen, ..);
+    }
+}
+// Connectors: render the visible canvas sub-rect at the window origin (culls).
+render_connectors(buf, vp.visible(), vp.origin(), &wires, &styles, &obstacles, weight);
+// Exact 2-D scrollbars — the canvas bounding box is known.
+render_scrollbar(buf, vscroll_rect, vp.v_metrics(), style);
+render_scrollbar(buf, hscroll_rect, vp.h_metrics(), style);
+```
+
+Three things matter here. **Culling** is plain — `is_visible(rect, margin)` / `project`
+draw only what intersects the window plus a margin (graphs have dozens of nodes,
+not millions, so the heavy paging machinery stays on the row/text side). **Scrollbars
+are exact** — `v_metrics`/`h_metrics` return `ScrollMetrics { exact: true }` because
+the canvas size is known, a clean contrast with the estimated row scrollbar over a
+remote cursor (§3.17) — same `render_scrollbar` widget, two truth-levels (it now
+picks orientation from the rect shape). And **routing is calm under pan**: connector
+routes are computed in canvas coordinates, which panning never touches, so the
+tracks stay put as you scroll instead of crawling — recomputed only on edits, not on
+camera motion. Demo: `cargo run --example viewport`.
+
 ---
 
 ## 4. API reference by module
@@ -1041,11 +1077,11 @@ and re-nudge live).
 | `border` | `draw_box`, `frame_tiles`, `render_shared`, `BorderStyle`, `Borders`, `LineWeight`, `CornerStyle`, `BorderGap` |
 | `table` | `ColumnGrid` (`resolve`, `row_rects`, `write_text`, `write_number`, `write_bar`), `ColumnDef`, `ColumnKind`, `Table` (`new`, `body_area`, `render`) |
 | `float` | `FloatLayer` (`with_child`, `solve`), `FloatChild`, `FloatRect`, `FreeInterval`, `free_intervals_in_rows`, `free_cells_in_window` |
-| `graph` | `GraphCanvas` (`new`, `with_grid`, `resize`, `add`, `remove`, `place`, `nodes`, `move_to`, `nudge`, `snap_to_grid`, `solve`) |
+| `graph` | `GraphCanvas` (`new`, `with_grid`, `resize`, `add`, `remove`, `place`, `nodes`, `move_to`, `nudge`, `snap_to_grid`, `solve`), `Viewport` (`pan_by`, `set_pan`, `visible`, `project`, `is_visible`, `v_metrics`/`h_metrics`) |
 | `route` | `route` (grid A\* with bend penalty), `route_all` (nudged set), `RouteRequest`, `Connector` (`route`), `render` (colour-per-net) |
 | `text` | `wrap`, `wrap_into_slots`, `shape_line`, `render_wrapped`, `render_line`, `WrappedText` (`lines`, `visible`, `page`, `page_count`), `VisualLine`, `VisualCell`, `CursorMap` (`visual_to_logical`, `logical_to_visual`), `BaseDirection` |
 | `record` | `RecordSource` (`key_of`, `fetch_after`, `fetch_before`, `approx_position`, `exact_len`), `Window`, `VecRecordSource` (`new`, `estimated`) |
-| `vlist` | `VirtualList` (`visible`, `scroll_by`, `set_viewport`, `scroll_metrics`, `at_top`/`at_bottom`, `capacity`), `ScrollMetrics`, `render_scrollbar` |
+| `vlist` | `VirtualList` (`visible`, `scroll_by`, `set_viewport`, `scroll_metrics`, `at_top`/`at_bottom`, `capacity`), `ScrollMetrics`, `render_scrollbar` (vertical or horizontal by rect shape) |
 | `docview` | `DocView` (`new`, `set_width`, `scroll_by`, `scroll_to_line`, `seek_to_byte`, `line_to_byte`, `byte_to_line`, `total_lines`, `line_count_hint`, `visible_lines`), `render_doc` |
 | `runaround` | `flow`, `slots_in`, `render_flow`, `Slot`, `PlacedLine` |
 | `socket` | `Socket` (`new`, `with_length`, `gap`, `rect`, `anchor`, `outward`, `attach`, `pack`), `Flow`, `bookends`, `draw_socket`, `FlowStyle` (`color`) |
@@ -1071,7 +1107,7 @@ Common re-exports at the crate root: `Buffer`, `Cell`, `Node`, `Constraint`,
 `VirtualList`, `ScrollMetrics`, `render_scrollbar`, `DocView`, `render_doc`,
 `wrap_into_slots`, `flow`, `slots_in`, `render_flow`, `Slot`, `PlacedLine`,
 `Socket`, `Flow`, `FlowStyle`, `draw_socket`, `bookends`, `GraphCanvas`, `route`,
-`route_all`, `Connector`, `RouteRequest`, `render_connectors`.
+`route_all`, `Connector`, `RouteRequest`, `render_connectors`, `Viewport`.
 Module-scoped:
 `Axis`, `region_of`, `carousel_visible_range`, `solve` (`layout`);
 `Dir`/`Direction` (`tree`).
@@ -1394,6 +1430,15 @@ triangle, each connector a distinct net colour, routed together with grid A\* so
 parallel wires nudge onto separate tracks and crossings (`┼`) are biased away.
 Drag a node (or nudge it) and the coloured wires reroute and re-nudge live.
 
+**`examples/viewport.rs`** — the §3.23 graph viewport: a graph on a canvas larger
+than the screen. Pan with arrows/`hjkl`, mouse drag, or the wheel; off-window nodes
+and wires are culled; exact scrollbars on both axes; the canvas-space routes stay
+put as you scroll.
+
+```text
+cargo run --example viewport
+```
+
 ```text
 cargo run --example wires
 ```
@@ -1454,10 +1499,12 @@ text engine, and node graphs on top of the tiling core):
 | 7     | `mullion::graph` — `GraphCanvas`: hand-placed nodes (drag / nudge / grid-snap) on a fixed-origin canvas; §3.21 manual |
 | 8     | `mullion::route` — orthogonal connector routing (grid A\* + bend penalty), canvas-space, junction-glyph rendering; `Socket::attach`/`outward`; §3.22 manual |
 | 9     | `mullion::route` — nudging (`route_all` edge-occupancy → separate tracks + gutter capacity), crossing bias, colour-per-net `render`; §3.22 manual |
+| 10    | `mullion::graph::Viewport` — 2D pan-and-cull over a larger canvas; `project`/`is_visible` culling; exact 2-axis scrollbars (`render_scrollbar` now orientation-aware); canvas-space routes stable under pan; §3.23 manual |
 
-**Upcoming (capability layer):** Phase 10 — graph viewport (2D pan-and-cull): pan a
-window over a larger canvas; cull off-window nodes/wires; routes stay stable in
-canvas space (computed on edits, not camera motion).
+**Upcoming (capability layer):** Phase 11 — semantic (level-of-detail) zoom: as a
+tile is allocated more cells it crosses thresholds that swap its rendering for a
+denser one (collapsed → titled → ported → full graph), via solver-driven area
+animation + discrete LoD thresholds.
 
 See `docs/tiling-engine-roadmap.md` and `docs/mullion-design-note.md` for the full
 plans and open design questions. This manual tracks the public API as each phase
