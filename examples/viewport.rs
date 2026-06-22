@@ -34,8 +34,6 @@ use mullion::{
     Buffer, FloatRect, GraphCanvas, LineWeight, Rect, Terminal, TileId, Viewport,
 };
 
-const CANVAS_W: u16 = 140;
-const CANVAS_H: u16 = 44;
 const MARGIN: u16 = 1; // cull margin, so nodes just off-screen do not pop
 const BEND: u32 = 4;
 const CROSS: u32 = 8;
@@ -50,18 +48,31 @@ struct State {
     drag: Option<(u16, u16)>,
 }
 
+/// A canvas at least **twice the window** in each axis (and a sensible minimum), so
+/// there is always something to pan to no matter how large the terminal is.
+fn canvas_size(window: Rect) -> (u16, u16) {
+    let w = (window.width as u32 * 2).max(160).min(u16::MAX as u32) as u16;
+    let h = (window.height as u32 * 2).max(50).min(u16::MAX as u32) as u16;
+    (w, h)
+}
+
 impl State {
     fn new(window: Rect) -> Self {
-        let mut canvas = GraphCanvas::new(CANVAS_W, CANVAS_H);
+        let (cw, ch) = canvas_size(window);
+        let mut canvas = GraphCanvas::new(cw, ch);
+        // Eight nodes spread across the canvas by fractional position (GraphCanvas
+        // clamps each into bounds), so content is reachable in every direction.
         let spots = [
-            (4, 2), (40, 4), (82, 3), (112, 7),
-            (10, 22), (50, 20), (92, 25), (118, 32),
+            (0.03, 0.05), (0.34, 0.12), (0.64, 0.06), (0.86, 0.18),
+            (0.06, 0.55), (0.36, 0.66), (0.66, 0.58), (0.88, 0.80),
         ];
-        for (i, &(x, y)) in spots.iter().enumerate() {
+        for (i, &(fx, fy)) in spots.iter().enumerate() {
+            let x = (fx * cw as f32) as u16;
+            let y = (fy * ch as f32) as u16;
             canvas.add(i as TileId + 1, FloatRect::new(x, y, 16, 7));
         }
         let wires = vec![(1, 2), (2, 3), (3, 4), (5, 6), (6, 7), (7, 8), (1, 5), (4, 8)];
-        Self { canvas, wires, vp: Viewport::new(window, CANVAS_W, CANVAS_H), drag: None }
+        Self { canvas, wires, vp: Viewport::new(window, cw, ch), drag: None }
     }
 }
 
@@ -90,6 +101,15 @@ fn render(buf: &mut Buffer, st: &mut State) {
     }
     let (window, vscroll, hscroll) = layout(area);
     st.vp.set_window(window);
+    // Keep the canvas ≥ 2× the window even after a resize-to-maximised, so there is
+    // always room to pan. The canvas only ever grows (no thrash); nodes stay put.
+    let (want_w, want_h) = canvas_size(window);
+    let (cw, ch) = st.vp.canvas();
+    if cw < want_w || ch < want_h {
+        let (nw, nh) = (cw.max(want_w), ch.max(want_h));
+        st.canvas.resize(nw, nh);
+        st.vp.set_canvas(nw, nh);
+    }
 
     // Node rects in canvas coordinates (the model; independent of the camera).
     let node_rects: Vec<(TileId, Rect)> = st
@@ -102,7 +122,8 @@ fn render(buf: &mut Buffer, st: &mut State) {
 
     // Route every wire over the whole canvas (stable in canvas space).
     let free: HashSet<(u16, u16)> = {
-        let cr = Rect::new(0, 0, CANVAS_W, CANVAS_H);
+        let (cw, ch) = st.vp.canvas();
+        let cr = Rect::new(0, 0, cw, ch);
         free_cells_in_window(cr, &obstacles, 0, cr).into_iter().collect()
     };
     let rect_of = |id: TileId| node_rects.iter().find(|&&(i, _)| i == id).map(|&(_, r)| r);
