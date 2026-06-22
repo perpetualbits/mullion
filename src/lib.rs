@@ -60,6 +60,7 @@ pub mod layout;
 pub mod mouse;
 pub mod record;
 pub mod render;
+pub mod runaround;
 pub mod style;
 pub mod terminal;
 pub mod text;
@@ -83,11 +84,12 @@ pub use float::{
     free_cells_in_window, free_intervals_in_rows, FloatChild, FloatLayer, FloatRect, FreeInterval,
 };
 pub use record::{RecordSource, VecRecordSource, Window};
+pub use runaround::{flow, render_flow, slots_in, PlacedLine, Slot};
 pub use vlist::{render_scrollbar, ScrollMetrics, VirtualList};
 pub use table::{ColumnDef, ColumnGrid, ColumnKind, Table};
 pub use text::{
-    render_line, render_wrapped, shape_line, wrap, BaseDirection, CursorMap, VisualCell,
-    VisualLine, WrappedText,
+    render_line, render_wrapped, shape_line, wrap, wrap_into_slots, BaseDirection, CursorMap,
+    VisualCell, VisualLine, WrappedText,
 };
 pub use style::{Color, ColorDepth, Modifier, Style};
 pub use theme::Theme;

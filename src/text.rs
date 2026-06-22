@@ -351,51 +351,62 @@ fn fill_lines(graphemes: &[Grapheme], flags: &BreakFlags, width: u16) -> Vec<Ran
     let n = graphemes.len();
     let target = width as u32;
     let mut lines: Vec<Range<usize>> = Vec::new();
+    let mut start = 0usize;
 
-    let mut start = 0usize; // grapheme index where the current line begins
-    let mut i = 0usize; // grapheme under consideration
+    // Flat wrapping is the obstacle-free special case of the slot stream: an
+    // unbounded run of equal-width slots. The same per-line kernel serves both.
+    while start < n {
+        let end = fill_one_line(graphemes, flags, start, target);
+        if end == start {
+            // Oversized lone grapheme (width < 2 regime): emit it by itself so the
+            // walk makes progress; this is the one case a line may exceed `width`.
+            lines.push(start..start + 1);
+            start += 1;
+        } else {
+            lines.push(trim_trailing_spaces(graphemes, start..end));
+            start = end;
+        }
+    }
+    lines
+}
+
+/// Greedily fill one line/slot, returning the grapheme index where it ends.
+///
+/// Walks forward from `start`, accumulating widths, until the next visible
+/// grapheme would overflow `target` (wrap at the last allowed break, or hard-break
+/// here if none), or a hard newline forces the line to end, or the text runs out.
+/// Breakable spaces hang past the edge rather than forcing a wrap (the caller
+/// trims them). The returned range is **not** trimmed.
+///
+/// # Returns
+/// The exclusive end grapheme index. `end == start` means not even the first
+/// visible grapheme fits `target` — the caller decides whether to emit it anyway
+/// (flat wrap) or skip to a wider slot (runaround).
+fn fill_one_line(graphemes: &[Grapheme], flags: &BreakFlags, start: usize, target: u32) -> usize {
+    let n = graphemes.len();
+    let mut i = start;
     let mut acc = 0u32; // accumulated width of [start, i), trailing spaces included
     let mut last_break: Option<usize> = None; // best break boundary seen in-line
 
     while i < n {
-        // A hard newline before grapheme `i` ends the current line here.
+        // A hard newline before grapheme `i` ends this line.
         if i > start && flags.mandatory[i] {
-            lines.push(trim_trailing_spaces(graphemes, start..i));
-            start = i;
-            acc = 0;
-            last_break = None;
+            return i;
         }
-
         let g = &graphemes[i];
         let w = g.width as u32;
-        // Spaces hang past the edge instead of forcing a wrap; only a visible
-        // grapheme that overflows causes a line break.
-        let overflow = w > 0 && acc + w > target && !g.is_space;
-
-        if overflow {
-            if i > start {
+        // Spaces hang past the edge; only a visible grapheme that overflows wraps.
+        if w > 0 && acc + w > target && !g.is_space {
+            return if i > start {
                 // Wrap at the remembered break, or hard-break at `i` if none.
-                let brk = match last_break {
+                match last_break {
                     Some(b) if b > start => b,
                     _ => i,
-                };
-                lines.push(trim_trailing_spaces(graphemes, start..brk));
-                start = brk;
-                acc = 0;
-                last_break = None;
-                i = brk; // re-scan the carried graphemes onto the new line
-                continue;
+                }
             } else {
-                // Oversized lone grapheme (width < 2 regime): emit it by itself.
-                lines.push(start..i + 1);
-                start = i + 1;
-                acc = 0;
-                last_break = None;
-                i += 1;
-                continue;
-            }
+                start // first visible grapheme too wide for `target`
+            };
         }
-
         acc += w;
         i += 1;
         // Record an allowed break at the boundary we just crossed.
@@ -403,11 +414,41 @@ fn fill_lines(graphemes: &[Grapheme], flags: &BreakFlags, width: u16) -> Vec<Ran
             last_break = Some(i);
         }
     }
+    n
+}
 
-    if start < n {
-        lines.push(trim_trailing_spaces(graphemes, start..n));
+/// Flow graphemes into a finite sequence of slots of the given widths, returning
+/// one grapheme-index range per slot (in slot order) — the runaround core (§3.5).
+///
+/// This is [`fill_lines`] generalized from "an unbounded run of equal-width
+/// lines" to "a bounded list of arbitrary-width slots", through the same
+/// [`fill_one_line`] kernel — so the obstacle-free case (one full-width slot per
+/// row) reduces to flat wrapping exactly.
+///
+/// A slot too narrow for the next grapheme is left **empty** (an empty range) and
+/// the grapheme is retried on the following, possibly wider, slot — so no glyph is
+/// ever placed in a slot it does not fit. Text that outlasts the slots is dropped
+/// (it falls below the viewport). Ranges are trimmed of trailing spaces.
+fn fill_slots(graphemes: &[Grapheme], flags: &BreakFlags, widths: &[u16]) -> Vec<Range<usize>> {
+    let n = graphemes.len();
+    let mut out = Vec::with_capacity(widths.len());
+    let mut start = 0usize;
+
+    for &w in widths {
+        if start >= n {
+            out.push(start..start); // text exhausted — remaining slots are empty
+            continue;
+        }
+        let end = fill_one_line(graphemes, flags, start, w as u32);
+        if end == start {
+            // Too narrow for the next grapheme: leave empty, retry on a later slot.
+            out.push(start..start);
+        } else {
+            out.push(trim_trailing_spaces(graphemes, start..end));
+            start = end;
+        }
     }
-    lines
+    out
 }
 
 /// Shrink a grapheme-index range from the right, dropping trailing breakable
@@ -424,8 +465,12 @@ fn trim_trailing_spaces(graphemes: &[Grapheme], range: Range<usize>) -> Range<us
 }
 
 /// Convert a grapheme-index range to a byte range within `text`.
+///
+/// A grapheme index at or past the end maps to `text.len()`, so an empty range
+/// `n..n` (an empty slot in [`fill_slots`]) becomes an empty byte range rather
+/// than panicking.
 fn byte_range(text: &str, graphemes: &[Grapheme], gr: Range<usize>) -> Range<usize> {
-    let start = graphemes[gr.start].byte;
+    let start = graphemes.get(gr.start).map(|g| g.byte).unwrap_or(text.len());
     let end = graphemes.get(gr.end).map(|g| g.byte).unwrap_or(text.len());
     start..end
 }
@@ -534,6 +579,44 @@ pub fn wrap(text: &str, width: u16, base: BaseDirection) -> WrappedText {
     WrappedText { lines, width }
 }
 
+/// Flow `text` into a sequence of slots of the given `widths`, producing one
+/// bidi-correct [`VisualLine`] per slot — the geometry-free core of runaround
+/// (§3.5).
+///
+/// Tokens are flowed greedily into the slots in order: each slot is filled to its
+/// own width, the next picking up where the last left off (so a tile splits a row
+/// into "left of tile" then "right of tile" slots that flow in sequence). The
+/// returned vector has exactly `widths.len()` entries, aligned by index to
+/// `widths`; a slot that received no text is an empty line, and text that outlasts
+/// the slots is dropped. Callers (see [`crate::runaround`]) attach each line's
+/// row/column from the slot geometry.
+///
+/// Because this routes through the same kernel as [`wrap`], a single full-width
+/// slot per row reproduces flat wrapping exactly. No glyph is ever placed in a
+/// slot narrower than it.
+pub fn wrap_into_slots(text: &str, widths: &[u16], base: BaseDirection) -> Vec<VisualLine> {
+    let graphemes = segment(text);
+    let info = BidiInfo::new(text, base.to_level());
+    if graphemes.is_empty() {
+        // No content: every slot is an empty line, preserving positional alignment.
+        return widths.iter().map(|_| empty_visual_line()).collect();
+    }
+    let flags = break_flags(text, &graphemes);
+    fill_slots(&graphemes, &flags, widths)
+        .into_iter()
+        .map(|gr| build_line(text, byte_range(text, &graphemes, gr), &info))
+        .collect()
+}
+
+/// An empty visual line (no cells, identity map) at the document origin.
+fn empty_visual_line() -> VisualLine {
+    VisualLine {
+        cells: Vec::new(),
+        map: CursorMap::from_v2l(Vec::new()),
+        source: 0..0,
+    }
+}
+
 /// Shape `text` as a single bidi-correct visual line — the primitive for flowed
 /// chrome-adjacent content such as a table cell or a flowing label (§3.3/§6.3).
 ///
@@ -544,11 +627,7 @@ pub fn wrap(text: &str, width: u16, base: BaseDirection) -> WrappedText {
 /// the target width instead. `base` selects the base direction as in [`wrap`].
 pub fn shape_line(text: &str, _width: u16, base: BaseDirection) -> VisualLine {
     if text.is_empty() {
-        return VisualLine {
-            cells: Vec::new(),
-            map: CursorMap::from_v2l(Vec::new()),
-            source: 0..0,
-        };
+        return empty_visual_line();
     }
     let info = BidiInfo::new(text, base.to_level());
     build_line(text, 0..text.len(), &info)
@@ -703,6 +782,34 @@ mod tests {
     }
 
     // ── Rendering & the TestBackend lock ──────────────────────────────────
+
+    #[test]
+    fn wrap_into_slots_flows_across_varying_widths() {
+        // Slots of width 5, 3, 8: greedy fill flows across the sequence.
+        let lines = wrap_into_slots("alpha beta gamma", &[5, 3, 8], BaseDirection::Ltr);
+        assert_eq!(lines.len(), 3); // one line per slot
+        assert_eq!(visual_string(&lines[0]), "alpha");
+        // The width-3 slot is too narrow for "beta", so it hard-breaks like any
+        // narrow column would — "bet" here, the rest carrying into the next slot.
+        assert_eq!(visual_string(&lines[1]), "bet");
+        assert_eq!(visual_string(&lines[2]), "a gamma");
+    }
+
+    #[test]
+    fn wrap_into_slots_too_narrow_slot_left_empty() {
+        // A width-1 slot cannot hold a width-2 grapheme: it stays empty and the
+        // grapheme flows into the next slot that fits it.
+        let lines = wrap_into_slots("\u{4e16}\u{754c}", &[1, 4], BaseDirection::Ltr);
+        assert_eq!(visual_string(&lines[0]), ""); // 世 does not fit width 1
+        assert_eq!(visual_string(&lines[1]), "\u{4e16}\u{754c}");
+    }
+
+    #[test]
+    fn wrap_into_slots_empty_text_yields_empty_slots() {
+        let lines = wrap_into_slots("", &[4, 4], BaseDirection::Ltr);
+        assert_eq!(lines.len(), 2);
+        assert!(lines.iter().all(|l| l.cells.is_empty()));
+    }
 
     #[test]
     fn render_clips_to_width() {
