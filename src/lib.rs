@@ -88,7 +88,7 @@ pub use float::{
 };
 pub use graph::GraphCanvas;
 pub use record::{RecordSource, VecRecordSource, Window};
-pub use route::{render as render_connectors, route, Connector};
+pub use route::{render as render_connectors, route, route_all, Connector, RouteRequest};
 pub use runaround::{flow, render_flow, slots_in, PlacedLine, Slot};
 pub use socket::{bookends, draw_socket, Flow, FlowStyle, Socket};
 pub use vlist::{render_scrollbar, ScrollMetrics, VirtualList};
