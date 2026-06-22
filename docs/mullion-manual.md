@@ -1055,6 +1055,46 @@ routes are computed in canvas coordinates, which panning never touches, so the
 tracks stay put as you scroll instead of crawling — recomputed only on edits, not on
 camera motion. Demo: `cargo run --example viewport`.
 
+### 3.24 Semantic (level-of-detail) zoom — `mullion::zoom`
+
+Terminal cells do not scale continuously — there is no 1.7× cell — so "zoom" is not
+optical magnification (design note §5.6). It is **level of detail**, from two
+cooperating mechanisms.
+
+**Continuous area animation** grows a focused tile *through the layout solver*. A
+`Zoom` eases the focus's `Fill` weight up; feed `weight(id)` into each sibling's
+constraint and re-solve every frame, and the solver itself expands the focus while
+its neighbours reflow and shrink — a smooth grow, not the discrete `Tree::zoom_to`
+jump. (A floating child or a graph node, which do not pass through the `Fill`
+solver, instead grow by `lerp_rect` toward a target rect.)
+
+**Discrete LoD thresholds** then pick the renderer from the cells the tile ends up
+with: `Lod::for_area` maps an area to `Collapsed → Titled → Ported → Full` (the
+variants are ordered, and selection is monotonic — more cells never means less
+detail). The two line up because cells and detail levels are both discrete.
+
+```rust
+use mullion::{Zoom, Lod, LodScale, layout::{self, Constraint, Node, Size}};
+
+let mut zoom = Zoom::new(/* focus id */ 1, /* max weight */ 400);
+zoom.set_progress(t);                         // t in 0..1, eased internally
+// Build the split giving each child Size::Fill(zoom.weight(id)), then solve:
+let tiles = layout::solve(&mut root, area);
+for (id, rect) in &tiles {
+    match Lod::for_rect(*rect, LodScale::default()) {
+        Lod::Collapsed => {/* a marker */}
+        Lod::Titled    => {/* + title */}
+        Lod::Ported    => {/* + sockets */}
+        Lod::Full      => {/* + internal graph */}
+    }
+}
+```
+
+A focus may be a tiling child, a floating child, or a node inside a nested graph;
+`FocusTarget` (`Tile`/`Float`/`Node`) carries the id and `resolve`s it against the
+matching solver's `(id, rect)` output. Demo: `cargo run --example zoom` (zoom a
+tile and watch it cross collapsed → titled → ported → full internal graph).
+
 ---
 
 ## 4. API reference by module
@@ -1079,6 +1119,7 @@ camera motion. Demo: `cargo run --example viewport`.
 | `float` | `FloatLayer` (`with_child`, `solve`), `FloatChild`, `FloatRect`, `FreeInterval`, `free_intervals_in_rows`, `free_cells_in_window` |
 | `graph` | `GraphCanvas` (`new`, `with_grid`, `resize`, `add`, `remove`, `place`, `nodes`, `move_to`, `nudge`, `snap_to_grid`, `solve`), `Viewport` (`pan_by`, `set_pan`, `visible`, `project`, `is_visible`, `v_metrics`/`h_metrics`) |
 | `route` | `route` (grid A\* with bend penalty), `route_all` (nudged set), `RouteRequest`, `Connector` (`route`), `render` (colour-per-net) |
+| `zoom` | `Lod` (`for_area`/`for_rect`), `LodScale`, `Zoom` (`weight`, `set_progress`), `lerp_rect`, `FocusTarget` (`resolve`) |
 | `text` | `wrap`, `wrap_into_slots`, `shape_line`, `render_wrapped`, `render_line`, `WrappedText` (`lines`, `visible`, `page`, `page_count`), `VisualLine`, `VisualCell`, `CursorMap` (`visual_to_logical`, `logical_to_visual`), `BaseDirection` |
 | `record` | `RecordSource` (`key_of`, `fetch_after`, `fetch_before`, `approx_position`, `exact_len`), `Window`, `VecRecordSource` (`new`, `estimated`) |
 | `vlist` | `VirtualList` (`visible`, `scroll_by`, `set_viewport`, `scroll_metrics`, `at_top`/`at_bottom`, `capacity`), `ScrollMetrics`, `render_scrollbar` (vertical or horizontal by rect shape) |
@@ -1107,7 +1148,8 @@ Common re-exports at the crate root: `Buffer`, `Cell`, `Node`, `Constraint`,
 `VirtualList`, `ScrollMetrics`, `render_scrollbar`, `DocView`, `render_doc`,
 `wrap_into_slots`, `flow`, `slots_in`, `render_flow`, `Slot`, `PlacedLine`,
 `Socket`, `Flow`, `FlowStyle`, `draw_socket`, `bookends`, `GraphCanvas`, `route`,
-`route_all`, `Connector`, `RouteRequest`, `render_connectors`, `Viewport`.
+`route_all`, `Connector`, `RouteRequest`, `render_connectors`, `Viewport`, `Lod`,
+`LodScale`, `Zoom`, `lerp_rect`, `FocusTarget`.
 Module-scoped:
 `Axis`, `region_of`, `carousel_visible_range`, `solve` (`layout`);
 `Dir`/`Direction` (`tree`).
@@ -1443,6 +1485,14 @@ cargo run --example viewport
 cargo run --example wires
 ```
 
+**`examples/zoom.rs`** — the §3.24 semantic zoom: a grid of tiles where the focused
+one grows through the layout solver and crosses LoD thresholds (collapsed → titled →
+ported → full internal graph). `Tab` focuses, `space`/`z` zoom in/out.
+
+```text
+cargo run --example zoom
+```
+
 **`examples/spiral_stress.rs`** (in the `aerie` crate) — an animated stress test
 and visual demo.  Draws a stack of nested frames arranged like a Fibonacci /
 golden-rectangle spiral that continuously uncurls and re-curls the other way
@@ -1500,11 +1550,12 @@ text engine, and node graphs on top of the tiling core):
 | 8     | `mullion::route` — orthogonal connector routing (grid A\* + bend penalty), canvas-space, junction-glyph rendering; `Socket::attach`/`outward`; §3.22 manual |
 | 9     | `mullion::route` — nudging (`route_all` edge-occupancy → separate tracks + gutter capacity), crossing bias, colour-per-net `render`; §3.22 manual |
 | 10    | `mullion::graph::Viewport` — 2D pan-and-cull over a larger canvas; `project`/`is_visible` culling; exact 2-axis scrollbars (`render_scrollbar` now orientation-aware); canvas-space routes stable under pan; §3.23 manual |
+| 11    | `mullion::zoom` — semantic level-of-detail zoom: `Zoom` grows a focus tile through the solver (`Fill` weight easing), `Lod`/`LodScale` discrete thresholds, `lerp_rect`, `FocusTarget`; §3.24 manual |
 
-**Upcoming (capability layer):** Phase 11 — semantic (level-of-detail) zoom: as a
-tile is allocated more cells it crosses thresholds that swap its rendering for a
-denser one (collapsed → titled → ported → full graph), via solver-driven area
-animation + discrete LoD thresholds.
+**Upcoming (capability layer):** Phase 12 — Sugiyama (layered) auto-layout: assign
+layers along the dataflow direction, order within layers by median/barycenter to cut
+crossings, break cycles first with a feedback-arc-set heuristic — the dagre / `dot` /
+ELK-layered family, the right default for port-directed graphs.
 
 See `docs/tiling-engine-roadmap.md` and `docs/mullion-design-note.md` for the full
 plans and open design questions. This manual tracks the public API as each phase
