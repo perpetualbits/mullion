@@ -62,6 +62,10 @@ path = "examples/wires.rs"
 name = "viewport"
 path = "examples/viewport.rs"
 
+[[example]]
+name = "zoom"
+path = "examples/zoom.rs"
+
 [dependencies]
 bitflags = "2"
 crossterm = "0.28"
