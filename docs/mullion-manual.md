@@ -978,7 +978,7 @@ scrolling and are recomputed on graph edits; callers reroute every frame (cheap
 at this scale).
 
 ```rust
-use mullion::{Rect, route::{render as render_connectors, Connector}};
+use mullion::{Rect, route::{render as render_connectors, route_all, RouteRequest}};
 use mullion::socket::{Socket, Flow};
 use mullion::float::free_cells_in_window;
 use mullion::label::Side;
@@ -989,24 +989,35 @@ let free = free_cells_in_window(canvas, &node_rects, 0, canvas).into_iter().coll
 
 let src = Socket::new(Side::Right, 3, Flow::Out, 0);   // an output port
 let dst = Socket::new(Side::Left, 3, Flow::In, 0);     // an input port
-let wire = Connector::route(
-    &free,
+let reqs = [RouteRequest::new(
     src.attach(node_a).unwrap(),                       // start = cell outside the socket
     dst.attach(node_b).unwrap(),                       // goal
-    /* bend penalty */ 4,
     src.outward().opposite(), dst.outward().opposite(),// inward dirs, for the socket join
-);
-render_connectors(buf, canvas, (window.x, window.y), &[wire.unwrap()],
-                  &node_rects, LineWeight::Light, style);
+)];
+// Route the whole set together so parallel wires nudge apart and crossings bias away.
+let wires: Vec<_> = route_all(&free, &reqs, /* bend */ 4, /* crossing */ 8)
+    .into_iter().flatten().collect();
+render_connectors(buf, canvas, (window.x, window.y), &wires,
+                  &[style], &node_rects, LineWeight::Light);
 ```
 
 `Socket::attach` gives the free cell just outside a socket (the routing endpoint),
-and `Socket::outward` the direction it faces. Rendering reuses the junction glyph
-logic (§3.3): every wire is laid into an `EdgeGrid` as box-drawing arms, so turns
-— and crossings between wires — resolve to the right glyph automatically. There is
-no hop-over glyph (the charset has none); a crossing that is not a join reads as a
-`┼` until Phase 9 disambiguates it with color-per-net. Demo: `cargo run --example
-wires` (drag a node and the wires reroute live).
+and `Socket::outward` the direction it faces. (`route`/`Connector::route` route a
+single wire; `route_all` routes a set.) Rendering reuses the junction glyph logic
+(§3.3): every wire is laid into an `EdgeGrid` as box-drawing arms, so turns — and
+crossings/T-joins between wires — resolve to the right glyph automatically.
+
+**Nudging & crossings (§5.3).** `route_all` routes the requests in turn, forbidding
+each wire from running *along* an edge an earlier wire took — so parallel wires
+spread onto **separate integer tracks** and a gutter holds at most as many wires as
+it is cells wide (a net that no longer fits returns `None` — graceful capacity
+failure, not an overlap). A perpendicular **crossing** is allowed but charged a
+`crossing_penalty`, biasing the search toward crossing-free routes. There is no
+hop-over glyph (the charset has none), so the remaining crossings are disambiguated
+by **colour-per-net**: `render` takes a `styles` slice (one per connector) and a
+`┼` crossing keeps the later net's colour — you trace each wire by following its
+hue. Demo: `cargo run --example wires` (drag a node and the coloured wires reroute
+and re-nudge live).
 
 ---
 
@@ -1031,7 +1042,7 @@ wires` (drag a node and the wires reroute live).
 | `table` | `ColumnGrid` (`resolve`, `row_rects`, `write_text`, `write_number`, `write_bar`), `ColumnDef`, `ColumnKind`, `Table` (`new`, `body_area`, `render`) |
 | `float` | `FloatLayer` (`with_child`, `solve`), `FloatChild`, `FloatRect`, `FreeInterval`, `free_intervals_in_rows`, `free_cells_in_window` |
 | `graph` | `GraphCanvas` (`new`, `with_grid`, `resize`, `add`, `remove`, `place`, `nodes`, `move_to`, `nudge`, `snap_to_grid`, `solve`) |
-| `route` | `route` (grid A\* with bend penalty), `Connector` (`route`), `render` |
+| `route` | `route` (grid A\* with bend penalty), `route_all` (nudged set), `RouteRequest`, `Connector` (`route`), `render` (colour-per-net) |
 | `text` | `wrap`, `wrap_into_slots`, `shape_line`, `render_wrapped`, `render_line`, `WrappedText` (`lines`, `visible`, `page`, `page_count`), `VisualLine`, `VisualCell`, `CursorMap` (`visual_to_logical`, `logical_to_visual`), `BaseDirection` |
 | `record` | `RecordSource` (`key_of`, `fetch_after`, `fetch_before`, `approx_position`, `exact_len`), `Window`, `VecRecordSource` (`new`, `estimated`) |
 | `vlist` | `VirtualList` (`visible`, `scroll_by`, `set_viewport`, `scroll_metrics`, `at_top`/`at_bottom`, `capacity`), `ScrollMetrics`, `render_scrollbar` |
@@ -1060,7 +1071,7 @@ Common re-exports at the crate root: `Buffer`, `Cell`, `Node`, `Constraint`,
 `VirtualList`, `ScrollMetrics`, `render_scrollbar`, `DocView`, `render_doc`,
 `wrap_into_slots`, `flow`, `slots_in`, `render_flow`, `Slot`, `PlacedLine`,
 `Socket`, `Flow`, `FlowStyle`, `draw_socket`, `bookends`, `GraphCanvas`, `route`,
-`Connector`, `render_connectors`.
+`route_all`, `Connector`, `RouteRequest`, `render_connectors`.
 Module-scoped:
 `Axis`, `region_of`, `carousel_visible_range`, `solve` (`layout`);
 `Dir`/`Direction` (`tree`).
@@ -1379,8 +1390,9 @@ cargo run --example graph
 ```
 
 **`examples/wires.rs`** — the §3.22 connector routing: three nodes wired in a
-triangle, each connector routed orthogonally around the others with grid A\*.
-Drag a node (or nudge it) and the wires reroute live around it.
+triangle, each connector a distinct net colour, routed together with grid A\* so
+parallel wires nudge onto separate tracks and crossings (`┼`) are biased away.
+Drag a node (or nudge it) and the coloured wires reroute and re-nudge live.
 
 ```text
 cargo run --example wires
@@ -1441,10 +1453,11 @@ text engine, and node graphs on top of the tiling core):
 | 6     | `mullion::socket` — `Socket` (`BorderGap` with semantics), gap geometry + `pack`, `FlowStyle` connector-flow gradient; §3.20 manual |
 | 7     | `mullion::graph` — `GraphCanvas`: hand-placed nodes (drag / nudge / grid-snap) on a fixed-origin canvas; §3.21 manual |
 | 8     | `mullion::route` — orthogonal connector routing (grid A\* + bend penalty), canvas-space, junction-glyph rendering; `Socket::attach`/`outward`; §3.22 manual |
+| 9     | `mullion::route` — nudging (`route_all` edge-occupancy → separate tracks + gutter capacity), crossing bias, colour-per-net `render`; §3.22 manual |
 
-**Upcoming (capability layer):** Phase 9 — nudging + crossing resolution: spread
-parallel connectors onto separate tracks (gutter capacity), and disambiguate
-crossings with color-per-net + extended junction glyphs.
+**Upcoming (capability layer):** Phase 10 — graph viewport (2D pan-and-cull): pan a
+window over a larger canvas; cull off-window nodes/wires; routes stay stable in
+canvas space (computed on edits, not camera motion).
 
 See `docs/tiling-engine-roadmap.md` and `docs/mullion-design-note.md` for the full
 plans and open design questions. This manual tracks the public API as each phase
