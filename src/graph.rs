@@ -29,6 +29,7 @@
 use crate::float::{FloatChild, FloatLayer, FloatRect};
 use crate::geometry::Rect;
 use crate::layout::TileId;
+use crate::vlist::ScrollMetrics;
 
 // ── GraphCanvas ──────────────────────────────────────────────────────────────
 
@@ -162,6 +163,147 @@ fn clamp_in(place: FloatRect, width: u16, height: u16) -> FloatRect {
     FloatRect { x, y, width: place.width, height: place.height }
 }
 
+// ── Viewport ───────────────────────────────────────────────────────────────
+
+/// A window onto a larger canvas: a `(dx, dy)` **pan** offset plus the on-screen
+/// window rect (design note §5.7). The canvas cell at `pan` is shown at the
+/// window's top-left; panning slides the window over the canvas.
+///
+/// It projects canvas-space rects (nodes, and — via [`visible`](Viewport::visible)
+/// — connector routing regions) to screen and culls whatever falls outside, and
+/// reports **exact** scroll metrics on each axis (the canvas bounding box is known,
+/// unlike an estimated row scrollbar). Panning is a camera move only: it never
+/// touches canvas coordinates, so connector routes computed in canvas space stay
+/// put as you scroll.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Viewport {
+    window: Rect,
+    canvas: (u16, u16),
+    pan: (u16, u16),
+}
+
+impl Viewport {
+    /// A viewport showing a `canvas_w × canvas_h` canvas through `window`, panned to
+    /// the origin.
+    pub fn new(window: Rect, canvas_w: u16, canvas_h: u16) -> Self {
+        let mut v = Self { window, canvas: (canvas_w, canvas_h), pan: (0, 0) };
+        v.clamp();
+        v
+    }
+
+    /// The on-screen window rect.
+    pub fn window(&self) -> Rect {
+        self.window
+    }
+    /// The logical canvas size `(width, height)`.
+    pub fn canvas(&self) -> (u16, u16) {
+        self.canvas
+    }
+    /// The current pan offset `(x, y)` in canvas coordinates.
+    pub fn pan(&self) -> (u16, u16) {
+        self.pan
+    }
+    /// The largest pan on each axis — `canvas − window`, saturating (zero when the
+    /// canvas fits the window, i.e. nothing to scroll).
+    pub fn max_pan(&self) -> (u16, u16) {
+        (
+            self.canvas.0.saturating_sub(self.window.width),
+            self.canvas.1.saturating_sub(self.window.height),
+        )
+    }
+
+    fn clamp(&mut self) {
+        let (mx, my) = self.max_pan();
+        self.pan = (self.pan.0.min(mx), self.pan.1.min(my));
+    }
+
+    /// Replace the window rect (e.g. on resize), re-clamping the pan.
+    pub fn set_window(&mut self, window: Rect) {
+        self.window = window;
+        self.clamp();
+    }
+    /// Replace the canvas size, re-clamping the pan.
+    pub fn set_canvas(&mut self, width: u16, height: u16) {
+        self.canvas = (width, height);
+        self.clamp();
+    }
+    /// Pan to an absolute offset, clamped to `[0, max_pan]`.
+    pub fn set_pan(&mut self, x: u16, y: u16) {
+        self.pan = (x, y);
+        self.clamp();
+    }
+    /// Pan by `(dx, dy)` cells (negative = left/up), clamped to the canvas.
+    pub fn pan_by(&mut self, dx: i32, dy: i32) {
+        let x = (self.pan.0 as i32 + dx).max(0) as u16;
+        let y = (self.pan.1 as i32 + dy).max(0) as u16;
+        self.set_pan(x, y);
+    }
+
+    /// The canvas sub-rect currently visible through the window. Pass this as the
+    /// `canvas` region (with [`origin`](Viewport::origin)) to connector rendering.
+    pub fn visible(&self) -> Rect {
+        let w = self.window.width.min(self.canvas.0.saturating_sub(self.pan.0));
+        let h = self.window.height.min(self.canvas.1.saturating_sub(self.pan.1));
+        Rect::new(self.pan.0, self.pan.1, w, h)
+    }
+
+    /// The screen origin the canvas's visible top-left draws at (the window origin).
+    pub fn origin(&self) -> (u16, u16) {
+        (self.window.x, self.window.y)
+    }
+
+    /// Whether canvas rect `c` intersects the visible region grown by `margin` — the
+    /// cull test. Drawing every node for which this is true never omits one that
+    /// touches the window.
+    pub fn is_visible(&self, c: Rect, margin: u16) -> bool {
+        let v = self.visible();
+        let grown = Rect::new(
+            v.x.saturating_sub(margin),
+            v.y.saturating_sub(margin),
+            v.width + 2 * margin,
+            v.height + 2 * margin,
+        );
+        !c.intersection(grown).is_empty()
+    }
+
+    /// Project canvas rect `c` to its on-screen rect, **clipped to the window**;
+    /// `None` if `c` is not currently visible. The clip means a node straddling an
+    /// edge is drawn as its visible portion.
+    pub fn project(&self, c: Rect) -> Option<Rect> {
+        let inter = c.intersection(self.visible());
+        if inter.is_empty() {
+            return None;
+        }
+        Some(Rect::new(
+            self.window.x + (inter.x - self.pan.0),
+            self.window.y + (inter.y - self.pan.1),
+            inter.width,
+            inter.height,
+        ))
+    }
+
+    /// Exact horizontal scroll metrics (pan over canvas width) for
+    /// [`render_scrollbar`](crate::vlist::render_scrollbar).
+    pub fn h_metrics(&self) -> ScrollMetrics {
+        axis_metrics(self.pan.0, self.window.width, self.canvas.0)
+    }
+    /// Exact vertical scroll metrics (pan over canvas height).
+    pub fn v_metrics(&self) -> ScrollMetrics {
+        axis_metrics(self.pan.1, self.window.height, self.canvas.1)
+    }
+}
+
+/// Exact [`ScrollMetrics`] for one axis: `offset` of a `window`-long view over a
+/// `total`-long canvas. Always `exact` — the canvas length is known.
+fn axis_metrics(offset: u16, window: u16, total: u16) -> ScrollMetrics {
+    let total_f = total.max(1) as f32;
+    ScrollMetrics {
+        position: offset as f32 / total_f,
+        extent: window.min(total) as f32 / total_f,
+        exact: true,
+    }
+}
+
 // ── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -241,6 +383,67 @@ mod tests {
         assert_eq!(tile_at(&rects, 0, 0), None);
     }
 
+    // ── Viewport (Phase 10) ───────────────────────────────────────────────
+
+    #[test]
+    fn pan_clamps_to_canvas() {
+        // 100×60 canvas in a 40×20 window → max pan (60, 40).
+        let mut vp = Viewport::new(Rect::new(0, 0, 40, 20), 100, 60);
+        assert_eq!(vp.max_pan(), (60, 40));
+        vp.pan_by(999, 999);
+        assert_eq!(vp.pan(), (60, 40), "clamped to max");
+        vp.pan_by(-999, -5);
+        assert_eq!(vp.pan(), (0, 35));
+        // A canvas no larger than the window cannot scroll.
+        let small = Viewport::new(Rect::new(0, 0, 40, 20), 30, 10);
+        assert_eq!(small.max_pan(), (0, 0));
+    }
+
+    #[test]
+    fn project_maps_and_clips() {
+        let mut vp = Viewport::new(Rect::new(5, 2, 20, 10), 100, 60);
+        vp.set_pan(10, 4);
+        // A node fully inside: canvas (12,6,4,3) → screen (5+12-10, 2+6-4) = (7,4).
+        assert_eq!(vp.project(Rect::new(12, 6, 4, 3)), Some(Rect::new(7, 4, 4, 3)));
+        // A node straddling the left edge is clipped to its visible part.
+        // canvas (8,6,4,3): visible part x∈[10,12) → screen (5, 4), width 2.
+        assert_eq!(vp.project(Rect::new(8, 6, 4, 3)), Some(Rect::new(5, 4, 2, 3)));
+        // Fully off-window → culled.
+        assert_eq!(vp.project(Rect::new(0, 0, 4, 3)), None);
+    }
+
+    #[test]
+    fn scroll_metrics_are_exact() {
+        let mut vp = Viewport::new(Rect::new(0, 0, 20, 10), 100, 50);
+        vp.set_pan(40, 20);
+        let h = vp.h_metrics();
+        assert!(h.exact);
+        assert!((h.position - 0.4).abs() < 1e-6); // 40 / 100
+        assert!((h.extent - 0.2).abs() < 1e-6); //   20 / 100
+        let v = vp.v_metrics();
+        assert!((v.position - 0.4).abs() < 1e-6); // 20 / 50
+        assert!((v.extent - 0.2).abs() < 1e-6); //   10 / 50
+    }
+
+    #[test]
+    fn routes_are_invariant_under_pan() {
+        use crate::route::{route_all, RouteRequest};
+        use crate::tree::Direction;
+        use std::collections::HashSet;
+        // A scene in canvas space; routing depends only on the canvas, not the camera.
+        let nodes = [Rect::new(2, 2, 6, 4), Rect::new(30, 14, 6, 4)];
+        let canvas = Rect::new(0, 0, 60, 30);
+        let free: HashSet<(u16, u16)> =
+            crate::float::free_cells_in_window(canvas, &nodes, 0, canvas).into_iter().collect();
+        let reqs = [RouteRequest::new((9, 4), (29, 16), Direction::Right, Direction::Left)];
+        let before = route_all(&free, &reqs, 4, 4);
+        // Panning the viewport does not touch the canvas rects or free cells…
+        let mut vp = Viewport::new(Rect::new(0, 0, 20, 12), 60, 30);
+        vp.pan_by(15, 8);
+        let after = route_all(&free, &reqs, 4, 4);
+        assert_eq!(before, after, "routes are stable under pan (canvas-space routing)");
+    }
+
     // ── Property tests ────────────────────────────────────────────────────
 
     use proptest::prelude::*;
@@ -274,6 +477,22 @@ mod tests {
             c.nudge(7, dx, dy);
             c.nudge(7, -dx, -dy);
             prop_assert_eq!(c.place(7).unwrap(), before);
+        }
+
+        /// Culling never omits a node that touches the window: `is_visible` agrees
+        /// exactly with a ground-truth canvas-space intersection, and a visible node
+        /// always projects to a non-empty screen rect.
+        #[test]
+        fn prop_cull_never_omits_intersecting_node(
+            px in 0u16..80, py in 0u16..40,
+            nx in 0u16..120, ny in 0u16..60, nw in 1u16..12, nh in 1u16..8,
+        ) {
+            let mut vp = Viewport::new(Rect::new(3, 1, 30, 16), 120, 60);
+            vp.set_pan(px, py);
+            let node = Rect::new(nx, ny, nw, nh);
+            let touches = !node.intersection(vp.visible()).is_empty();
+            prop_assert_eq!(vp.is_visible(node, 0), touches);
+            prop_assert_eq!(vp.project(node).is_some(), touches);
         }
     }
 }

@@ -273,43 +273,50 @@ pub struct ScrollMetrics {
 
 // ── Scrollbar rendering ──────────────────────────────────────────────────────
 
-/// Draw a vertical scrollbar for `metrics` into the (1-column-wide) `rect`.
+/// Draw a scrollbar for `metrics` into `rect`. The **orientation follows the rect
+/// shape**: a wider-than-tall rect draws a horizontal bar (track `─`), otherwise a
+/// vertical one (track `│`) — so the same widget serves a row scrollbar and either
+/// axis of a 2-D graph viewport (§5.7).
 ///
 /// The thumb sits at `metrics.position` and spans `metrics.extent` of the track
 /// (at least one cell). When `metrics.exact` is `false` the thumb uses a
 /// **lighter shade glyph** (`▒` instead of `█`) so an estimated position is
 /// visibly distinct from a true one (§6.2). `style` colors both the thumb and the
-/// track; the track is drawn in that color with a [`Modifier::DIM`] and a thinner
-/// glyph (`│`) so it recedes behind the thumb.
+/// track; the track is drawn in that color with a [`Modifier::DIM`] so it recedes
+/// behind the thumb.
 ///
-/// Does nothing for a zero-height rect.
+/// Does nothing for a zero-size rect.
 pub fn render_scrollbar(buf: &mut Buffer, rect: Rect, metrics: ScrollMetrics, style: Style) {
     if rect.height == 0 || rect.width == 0 {
         return;
     }
-    let h = rect.height as usize;
-    let track_glyph = "│";
+    let horizontal = rect.width > rect.height;
+    let track_len = if horizontal { rect.width } else { rect.height } as usize;
+    let track_glyph = if horizontal { "─" } else { "│" };
     // Exact thumbs are solid; estimated thumbs use a shade so the eye reads them
     // as approximate rather than precise.
     let thumb_glyph = if metrics.exact { "█" } else { "▒" };
 
     // Thumb length in cells: at least 1, at most the whole track.
-    let thumb_len = ((metrics.extent * h as f32).round() as usize).clamp(1, h);
-    // Top of the thumb: position scaled over the free travel of the track.
-    let travel = h - thumb_len;
-    let thumb_top = (metrics.position * travel as f32).round() as usize;
-    let thumb_top = thumb_top.min(travel);
+    let thumb_len = ((metrics.extent * track_len as f32).round() as usize).clamp(1, track_len);
+    // Start of the thumb: position scaled over the free travel of the track.
+    let travel = track_len - thumb_len;
+    let thumb_start = ((metrics.position * travel as f32).round() as usize).min(travel);
 
-    for i in 0..h {
-        let y = rect.y + i as u16;
-        let in_thumb = i >= thumb_top && i < thumb_top + thumb_len;
+    for i in 0..track_len {
+        let in_thumb = i >= thumb_start && i < thumb_start + thumb_len;
         let (glyph, st) = if in_thumb {
             (thumb_glyph, style)
         } else {
             // The track recedes behind the thumb: same color, dimmed.
             (track_glyph, style.add_modifier(Modifier::DIM))
         };
-        buf.set_grapheme(rect.x, y, glyph, st);
+        let (x, y) = if horizontal {
+            (rect.x + i as u16, rect.y)
+        } else {
+            (rect.x, rect.y + i as u16)
+        };
+        buf.set_grapheme(x, y, glyph, st);
     }
 }
 
