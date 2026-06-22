@@ -938,6 +938,35 @@ unless the caller advances `t`. The surf field's autonomous drift/pulse/split-me
 is intentionally not lifted. In the demo, a connected socket's circle is recoloured
 with this gradient so it pulses with live flow. Demo: `cargo run --example sockets`.
 
+### 3.21 Graph canvas — `mullion::graph`
+
+A `GraphCanvas` is a tile whose floating children are **nodes**, placed by hand
+(design note §5.4/§5.7). It is a thin manager over the §3.15 floating-tile
+foundation — nodes are `FloatChild`s, so they carry stable `TileId`s across
+re-solves and their positions are part of the canvas state.
+
+```rust
+use mullion::{GraphCanvas, FloatRect, Rect, mouse::tile_at};
+
+let mut canvas = GraphCanvas::new(80, 24).with_grid(4);
+canvas.add(1, FloatRect::new(4, 2, 16, 7));   // id 1 at canvas-local (4,2)
+canvas.nudge(1, 1, 0);                          // keyboard move (clamped in-canvas)
+canvas.snap_to_grid(1);                         // align to the grid
+
+let window = Rect::new(0, 1, 80, 24);          // where the canvas is shown
+let placed = canvas.solve(window);             // Vec<(TileId, Rect)>, absolute
+let hit = tile_at(&placed, mouse_x, mouse_y);  // which node is under the cursor
+```
+
+Positions are **canvas-local** and every `move_to`/`nudge`/`snap_to_grid` clamps
+the node fully inside the canvas (`resize` re-clamps on a size change). `solve`
+maps to absolute screen rects against a window and reuses `FloatLayer::solve`, so
+the result is the same `(TileId, Rect)` shape the tiling solver produces — which
+means the existing `mouse::tile_at` (§3.9) is the node hit-test, the basis for
+click-to-select and drag. The canvas uses a **fixed origin**; panning a window
+over a larger canvas and culling off-window nodes is a later phase. Sockets
+(§3.20) sit on the nodes; wiring them is Phase 8. Demo: `cargo run --example graph`.
+
 ---
 
 ## 4. API reference by module
@@ -960,6 +989,7 @@ with this gradient so it pulses with live flow. Demo: `cargo run --example socke
 | `border` | `draw_box`, `frame_tiles`, `render_shared`, `BorderStyle`, `Borders`, `LineWeight`, `CornerStyle`, `BorderGap` |
 | `table` | `ColumnGrid` (`resolve`, `row_rects`, `write_text`, `write_number`, `write_bar`), `ColumnDef`, `ColumnKind`, `Table` (`new`, `body_area`, `render`) |
 | `float` | `FloatLayer` (`with_child`, `solve`), `FloatChild`, `FloatRect`, `FreeInterval`, `free_intervals_in_rows`, `free_cells_in_window` |
+| `graph` | `GraphCanvas` (`new`, `with_grid`, `resize`, `add`, `remove`, `place`, `nodes`, `move_to`, `nudge`, `snap_to_grid`, `solve`) |
 | `text` | `wrap`, `wrap_into_slots`, `shape_line`, `render_wrapped`, `render_line`, `WrappedText` (`lines`, `visible`, `page`, `page_count`), `VisualLine`, `VisualCell`, `CursorMap` (`visual_to_logical`, `logical_to_visual`), `BaseDirection` |
 | `record` | `RecordSource` (`key_of`, `fetch_after`, `fetch_before`, `approx_position`, `exact_len`), `Window`, `VecRecordSource` (`new`, `estimated`) |
 | `vlist` | `VirtualList` (`visible`, `scroll_by`, `set_viewport`, `scroll_metrics`, `at_top`/`at_bottom`, `capacity`), `ScrollMetrics`, `render_scrollbar` |
@@ -987,7 +1017,7 @@ Common re-exports at the crate root: `Buffer`, `Cell`, `Node`, `Constraint`,
 `CursorMap`, `BaseDirection`, `RecordSource`, `VecRecordSource`, `Window`,
 `VirtualList`, `ScrollMetrics`, `render_scrollbar`, `DocView`, `render_doc`,
 `wrap_into_slots`, `flow`, `slots_in`, `render_flow`, `Slot`, `PlacedLine`,
-`Socket`, `Flow`, `FlowStyle`, `draw_socket`, `bookends`.
+`Socket`, `Flow`, `FlowStyle`, `draw_socket`, `bookends`, `GraphCanvas`.
 Module-scoped:
 `Axis`, `region_of`, `carousel_visible_range`, `solve` (`layout`);
 `Dir`/`Direction` (`tree`).
@@ -1297,6 +1327,14 @@ with a circle terminal — `●` connected (the circle pulses with the flow grad
 cargo run --example sockets
 ```
 
+**`examples/graph.rs`** — the §3.21 graph canvas: three nodes (each carrying
+sockets) you can `Tab`-select and nudge with the arrows/`hjkl`, snap to the grid
+with `s`, or drag with the mouse. Nodes stay inside the canvas.
+
+```text
+cargo run --example graph
+```
+
 **`examples/spiral_stress.rs`** (in the `aerie` crate) — an animated stress test
 and visual demo.  Draws a stack of nested frames arranged like a Fibonacci /
 golden-rectangle spiral that continuously uncurls and re-curls the other way
@@ -1350,11 +1388,11 @@ text engine, and node graphs on top of the tiling core):
 | 4     | `mullion::docview` — wrapped-line virtualization, lazy byte→line index, width-change invalidation; §3.18 manual |
 | 5     | `mullion::runaround` — slot-stream flow around floating tiles (`wrap_into_slots`, `flow`); LTR then BiDi × runaround; §3.19 manual |
 | 6     | `mullion::socket` — `Socket` (`BorderGap` with semantics), gap geometry + `pack`, `FlowStyle` connector-flow gradient; §3.20 manual |
+| 7     | `mullion::graph` — `GraphCanvas`: hand-placed nodes (drag / nudge / grid-snap) on a fixed-origin canvas; §3.21 manual |
 
-**Upcoming (capability layer):** Phase 7 — manual node placement: a graph canvas
-whose floating children are nodes, positioned by mouse drag and keyboard nudge
-(building on the floating-tile foundation), with the §3.20 sockets placeable on
-them.
+**Upcoming (capability layer):** Phase 8 — orthogonal connector routing: grid A\*
+over the Phase 1 free-cell structure with a heavy bend penalty, in canvas space,
+wiring socket to socket ("train tracks").
 
 See `docs/tiling-engine-roadmap.md` and `docs/mullion-design-note.md` for the full
 plans and open design questions. This manual tracks the public API as each phase
