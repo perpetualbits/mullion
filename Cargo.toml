@@ -34,6 +34,10 @@ path = "examples/text.rs"
 name = "records"
 path = "examples/records.rs"
 
+[[example]]
+name = "document"
+path = "examples/document.rs"
+
 [dependencies]
 bitflags = "2"
 crossterm = "0.28"

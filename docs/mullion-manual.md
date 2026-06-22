@@ -825,6 +825,34 @@ truth levels** (design-note §6.2): the thumb is a true ordinal when the source'
 glyph) otherwise. Rows render through `ColumnGrid` exactly as a `Table` body does.
 Demo: `cargo run --example records`.
 
+### 3.18 Wrapped-line virtualization — `mullion::docview`
+
+Scroll and seek through one **enormous flowed document** without re-wrapping all
+of it. Harder than row virtualization because the wrapped-line count depends on
+the width — you cannot jump to "wrapped line 750,000" without knowing where it
+falls. The fix is a lazy **byte-offset → wrapped-line index**, built incrementally
+as you move, cached, and invalidated on width change. This is kept strictly
+separate from row virtualization (§3.17); they share only the viewport idea.
+
+```rust
+use mullion::{DocView, render_doc};
+
+let mut view = DocView::new(huge_string, 80);   // nothing wrapped yet
+view.scroll_by(500);                            // indexes lazily up to here
+render_doc(buf, area, &mut view, style);        // only the visible window is wrapped
+
+view.seek_to_byte(offset);    // lands on the wrapped line containing that byte
+view.set_width(60);           // invalidates the index, keeps the top anchored
+let n = view.total_lines();   // forces a full index (e.g. for an exact scrollbar)
+```
+
+The index is extended one paragraph-aligned chunk at a time (cuts always land just
+after a `\n`), so incremental wrapping is provably identical to a full-document
+wrap; only the **visible window** is re-wrapped for display, via the Phase 2 text
+engine (§3.16). `line_count_hint` returns `(indexed_so_far, complete)`, which
+drives an estimate-until-fully-indexed scrollbar (reusing the §3.17
+`render_scrollbar`). Demo: `cargo run --example document`.
+
 ---
 
 ## 4. API reference by module
@@ -850,6 +878,7 @@ Demo: `cargo run --example records`.
 | `text` | `wrap`, `shape_line`, `render_wrapped`, `render_line`, `WrappedText` (`lines`, `visible`, `page`, `page_count`), `VisualLine`, `VisualCell`, `CursorMap` (`visual_to_logical`, `logical_to_visual`), `BaseDirection` |
 | `record` | `RecordSource` (`key_of`, `fetch_after`, `fetch_before`, `approx_position`, `exact_len`), `Window`, `VecRecordSource` (`new`, `estimated`) |
 | `vlist` | `VirtualList` (`visible`, `scroll_by`, `set_viewport`, `scroll_metrics`, `at_top`/`at_bottom`, `capacity`), `ScrollMetrics`, `render_scrollbar` |
+| `docview` | `DocView` (`new`, `set_width`, `scroll_by`, `scroll_to_line`, `seek_to_byte`, `line_to_byte`, `byte_to_line`, `total_lines`, `line_count_hint`, `visible_lines`), `render_doc` |
 | `junction` | `EdgeGrid`, `EdgeCell`, `resolve` |
 | `label` | `draw_label`, `label_period`, `Label`, `Side`, `Align` |
 | `input` | `InputRouter`, `KeyOutcome`, `NavCommand`, `Keymap`, `MouseOutcome` (+ re-exported `KeyEvent`/`KeyCode`/`KeyModifiers`, `MouseEvent`/`MouseEventKind`/`MouseButton`) |
@@ -869,7 +898,8 @@ Common re-exports at the crate root: `Buffer`, `Cell`, `Node`, `Constraint`,
 `ColumnDef`, `ColumnGrid`, `ColumnKind`, `Table`, `FloatLayer`, `FloatChild`,
 `FloatRect`, `FreeInterval`, `wrap`, `shape_line`, `WrappedText`, `VisualLine`,
 `CursorMap`, `BaseDirection`, `RecordSource`, `VecRecordSource`, `Window`,
-`VirtualList`, `ScrollMetrics`, `render_scrollbar`.  Module-scoped:
+`VirtualList`, `ScrollMetrics`, `render_scrollbar`, `DocView`, `render_doc`.
+Module-scoped:
 `Axis`, `region_of`, `carousel_visible_range`, `solve` (`layout`);
 `Dir`/`Direction` (`tree`).
 
@@ -1140,6 +1170,16 @@ exact and a shade when estimated (press `e` to toggle the source).
 cargo run --example records
 ```
 
+**`examples/document.rs`** — the §3.18 wrapped-line virtualization: scroll and
+seek a ~60 KB flowed document while only the visible window is wrapped. The
+scrollbar is an estimate until the lazy index completes; press `G` to force a full
+index and watch it become exact. `[`/`]` change the wrap width (re-wraps, keeps
+position).
+
+```text
+cargo run --example document
+```
+
 **`examples/spiral_stress.rs`** (in the `aerie` crate) — an animated stress test
 and visual demo.  Draws a stack of nested frames arranged like a Fibonacci /
 golden-rectangle spiral that continuously uncurls and re-curls the other way
@@ -1190,10 +1230,11 @@ text engine, and node graphs on top of the tiling core):
 | 1     | `mullion::float` — floating tiles + free-space slots/cells; `mullion::record` `RecordSource` trait + `Window`; §3.15 manual |
 | 2     | `mullion::text` — bidi-aware wrapping, logical↔visual `CursorMap`, pagination/scrolling, `shape_line`; §3.16 manual |
 | 3     | `mullion::vlist` — row virtualization over `RecordSource`, exact/estimate scrollbar; `VecRecordSource`; §3.17 manual |
+| 4     | `mullion::docview` — wrapped-line virtualization, lazy byte→line index, width-change invalidation; §3.18 manual |
 
-**Upcoming (capability layer):** Phase 4 — wrapped-line virtualization (lazy
-byte→line index for one enormous flowed document); then Phase 5 — runaround
-(slot-stream flow around floating tiles), the first time §3.15 and §3.16 combine.
+**Upcoming (capability layer):** Phase 5 — runaround (slot-stream flow around
+floating tiles), the first time §3.15 and §3.16 combine; landed in two stages
+(LTR runaround, then BiDi × runaround).
 
 See `docs/tiling-engine-roadmap.md` and `docs/mullion-design-note.md` for the full
 plans and open design questions. This manual tracks the public API as each phase

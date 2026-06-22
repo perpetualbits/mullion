@@ -49,6 +49,7 @@ pub mod table;
 pub mod buffer;
 pub mod capabilities;
 pub mod charset;
+pub mod docview;
 pub mod ease;
 pub mod float;
 pub mod geometry;
@@ -76,6 +77,7 @@ pub use mouse::{carousel_at, tile_at};
 pub use layout::{carousel_visible_range, region_of, Constraint, Node, Orientation, Size, TileId};
 pub use capabilities::Capabilities;
 pub use charset::box_to_ascii;
+pub use docview::{render_doc, DocView};
 pub use ease::{gaussian, lerp, smoothstep};
 pub use float::{
     free_cells_in_window, free_intervals_in_rows, FloatChild, FloatLayer, FloatRect, FreeInterval,
