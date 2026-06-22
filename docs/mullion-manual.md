@@ -736,6 +736,97 @@ let table = Table::new(grid);   // grid moved here; bar_w already captured
 
 ---
 
+### 3.15 Floating tiles & free space — `mullion::float`
+
+A floating child occupies a sub-rectangle **inset** from its parent's borders,
+leaving free space around it — unlike a `Split`, which partitions its parent with
+no leftover. Floating tiles are a separate, composable layer (not a `Node`
+variant), so they solve *alongside* the tiling solve. Placements are
+**parent-local**, so a float keeps its position when the parent moves on a
+re-solve.
+
+```rust
+use mullion::{Rect, FloatLayer, FloatChild, FloatRect};
+use mullion::float::{free_intervals_in_rows, free_cells_in_window};
+
+let parent = Rect::new(0, 0, 40, 12);
+let layer = FloatLayer::new()
+    .with_child(FloatChild::new(1, FloatRect::new(6, 2, 16, 6))); // id 1, parent-local
+let placed = layer.solve(parent);          // Vec<(TileId, Rect)>, clipped to parent
+let obstacles: Vec<Rect> = placed.iter().map(|&(_, r)| r).collect();
+
+// Two views of the free space, both viewport-bounded, from one geometry:
+let slots = free_intervals_in_rows(parent, &obstacles, 1, 0..12); // per-row intervals (text)
+let cells = free_cells_in_window(parent, &obstacles, 0, parent);  // free cells (router)
+```
+
+The free-space query is the load-bearing output (design-note §2): the text engine
+reads it as per-row **slots** and the future connector router reads it as free
+**cells**. Because both derive from the same geometry, runaround text and routing
+can never disagree about where the obstacles are. The gutter (clearance kept
+around each float) is a per-query parameter. Demo: `cargo run --example floating`.
+
+### 3.16 Text engine — `mullion::text`
+
+Bidirectional, paginated paragraph wrapping. The pipeline runs per paragraph →
+per visual line: UAX #14 break opportunities → greedy width fill by
+grapheme-cluster width → UAX #9 reordering → emit cells **in visual order** (the
+terminal never reorders). It is bidi-correct from the first call; pure-LTR text
+reorders to the identity.
+
+```rust
+use mullion::text::{wrap, render_wrapped, BaseDirection};
+
+let wrapped = wrap("English then العربية then more", 20, BaseDirection::Ltr);
+for line in wrapped.lines() {
+    // line.cells are already in visual (display) order;
+    // line.map is the per-line logical↔visual bijection (§3.2)
+    let _visual_of_first = line.map.logical_to_visual(0);
+}
+render_wrapped(buf, area, &wrapped, /* scroll_top */ 0, style);
+```
+
+Each `VisualLine` carries a `CursorMap` — a bijection between logical (edit) order
+and visual (display) order, so the cursor moves *visually* while editing
+*logically*, and a selection across a direction boundary stays coherent.
+**Pagination** (`page`, `page_count`) and **continuous scrolling** (`visible`) are
+two views over the same wrapped model. `shape_line` is the single-line primitive
+for flowed chrome-adjacent content (table cells, flowing labels) so there is no
+bidi-correct/incorrect seam. Wrapping text *around* floating tiles (runaround) is
+a later phase. Demo: `cargo run --example text`.
+
+### 3.17 Row virtualization — `mullion::record` + `mullion::vlist`
+
+Scroll a window over a huge record set without materializing it. A `RecordSource`
+is **seek/keyset-shaped** — every fetch is anchored to a key, never an integer
+offset (`OFFSET 750000` is O(n) in SQL, and LDAP has no offset at all):
+
+```rust
+use mullion::{VecRecordSource, VirtualList, render_scrollbar};
+
+// VecRecordSource is the in-memory reference impl; a real one wraps SQL keyset
+// pagination (WHERE key > ? ORDER BY key LIMIT n) or LDAP's VLV control.
+let src = VecRecordSource::new((0u64..1_000_000).map(|k| (k, k * 7)).collect());
+let mut list = VirtualList::new(src, /* viewport */ 20, /* batch */ 32);
+
+list.scroll_by(50_000);                 // window refills via fetch_after/fetch_before
+for (key, value) in list.visible() {    // only the on-screen rows are materialized
+    // draw through ColumnGrid (reuse, not reinvent)
+}
+
+let m = list.scroll_metrics();          // { position, extent, exact }
+render_scrollbar(buf, bar_rect, m, style); // solid █ thumb if exact, ▒ shade if estimate
+```
+
+The window is kept within `capacity` rows; fetching follows the scroll direction
+so an end-to-end pass materializes each row exactly once. The scrollbar has **two
+truth levels** (design-note §6.2): the thumb is a true ordinal when the source's
+`exact_len` returns `Some`, and an honest **estimate** (drawn with a distinct
+glyph) otherwise. Rows render through `ColumnGrid` exactly as a `Table` body does.
+Demo: `cargo run --example records`.
+
+---
+
 ## 4. API reference by module
 
 | Module | Key items |
@@ -755,6 +846,10 @@ let table = Table::new(grid);   // grid moved here; bar_w already captured
 | `render` | `render_carousel` |
 | `border` | `draw_box`, `frame_tiles`, `render_shared`, `BorderStyle`, `Borders`, `LineWeight`, `CornerStyle`, `BorderGap` |
 | `table` | `ColumnGrid` (`resolve`, `row_rects`, `write_text`, `write_number`, `write_bar`), `ColumnDef`, `ColumnKind`, `Table` (`new`, `body_area`, `render`) |
+| `float` | `FloatLayer` (`with_child`, `solve`), `FloatChild`, `FloatRect`, `FreeInterval`, `free_intervals_in_rows`, `free_cells_in_window` |
+| `text` | `wrap`, `shape_line`, `render_wrapped`, `render_line`, `WrappedText` (`lines`, `visible`, `page`, `page_count`), `VisualLine`, `VisualCell`, `CursorMap` (`visual_to_logical`, `logical_to_visual`), `BaseDirection` |
+| `record` | `RecordSource` (`key_of`, `fetch_after`, `fetch_before`, `approx_position`, `exact_len`), `Window`, `VecRecordSource` (`new`, `estimated`) |
+| `vlist` | `VirtualList` (`visible`, `scroll_by`, `set_viewport`, `scroll_metrics`, `at_top`/`at_bottom`, `capacity`), `ScrollMetrics`, `render_scrollbar` |
 | `junction` | `EdgeGrid`, `EdgeCell`, `resolve` |
 | `label` | `draw_label`, `label_period`, `Label`, `Side`, `Align` |
 | `input` | `InputRouter`, `KeyOutcome`, `NavCommand`, `Keymap`, `MouseOutcome` (+ re-exported `KeyEvent`/`KeyCode`/`KeyModifiers`, `MouseEvent`/`MouseEventKind`/`MouseButton`) |
@@ -771,7 +866,10 @@ Common re-exports at the crate root: `Buffer`, `Cell`, `Node`, `Constraint`,
 `Size`, `Orientation`, `LineWeight`, `Theme`, `Capabilities`, `box_to_ascii`,
 `Color`, `ColorDepth`, `Style`, `node_id`, `id_from_key`, `reconcile_carousel`,
 `reconcile_split`, `region_of`, `carousel_visible_range`, `BorderGap`,
-`ColumnDef`, `ColumnGrid`, `ColumnKind`, `Table`.  Module-scoped:
+`ColumnDef`, `ColumnGrid`, `ColumnKind`, `Table`, `FloatLayer`, `FloatChild`,
+`FloatRect`, `FreeInterval`, `wrap`, `shape_line`, `WrappedText`, `VisualLine`,
+`CursorMap`, `BaseDirection`, `RecordSource`, `VecRecordSource`, `Window`,
+`VirtualList`, `ScrollMetrics`, `render_scrollbar`.  Module-scoped:
 `Axis`, `region_of`, `carousel_visible_range`, `solve` (`layout`);
 `Dir`/`Direction` (`tree`).
 
@@ -1016,6 +1114,32 @@ cargo run --example showcase
 
 `showcase.rs` is the reference for the `render_carousel` ↔ `render_shared` composition.
 
+**`examples/floating.rs`** — the §3.15 foundation: two floating tiles over a
+parent, with the free space shaded live (free cells as dots, the gutter band
+distinct). Move a float with `hjkl`/arrows, switch with `Tab`, change the gutter
+with `[`/`]`; the free space re-solves every frame.
+
+```text
+cargo run --example floating
+```
+
+**`examples/text.rs`** — the §3.16 text engine: a paragraph mixing LTR English, a
+hard newline, and an RTL Arabic run, wrapped to an adjustable width. Arrow keys
+move the cursor *visually* while the status shows the *logical* index it maps to;
+`[`/`]` reflow the width; `p` toggles pagination ↔ scrolling.
+
+```text
+cargo run --example text
+```
+
+**`examples/records.rs`** — the §3.17 virtual list: scroll a window over 100,000
+keyed records rendered through `ColumnGrid`, with a scrollbar that is solid when
+exact and a shade when estimated (press `e` to toggle the source).
+
+```text
+cargo run --example records
+```
+
 **`examples/spiral_stress.rs`** (in the `aerie` crate) — an animated stress test
 and visual demo.  Draws a stack of nested frames arranged like a Fibonacci /
 golden-rectangle spiral that continuously uncurls and re-curls the other way
@@ -1058,7 +1182,19 @@ cargo run --release --example spiral_stress --swarm  # swarm + zoom
 | 8e    | `mullion::table` — `ColumnGrid`, `ColumnDef`, `ColumnKind`, `write_text`/`write_number`/`write_bar`; §3.13 manual |
 | 8f    | `Table` — header + carousel body + footer with shared column rects; `body_area` helper; §3.14 manual |
 
-**Upcoming:** Phase 9 — multi-pane drill-down, mouse selection.
+**Capability layer** (the `docs/mullion-design-note.md` roadmap — floating tiles,
+text engine, and node graphs on top of the tiling core):
 
-See `docs/tiling-engine-roadmap.md` for the full plan and open design questions.
-This manual tracks the public API as each phase merges.
+| Phase | What landed |
+|-------|-------------|
+| 1     | `mullion::float` — floating tiles + free-space slots/cells; `mullion::record` `RecordSource` trait + `Window`; §3.15 manual |
+| 2     | `mullion::text` — bidi-aware wrapping, logical↔visual `CursorMap`, pagination/scrolling, `shape_line`; §3.16 manual |
+| 3     | `mullion::vlist` — row virtualization over `RecordSource`, exact/estimate scrollbar; `VecRecordSource`; §3.17 manual |
+
+**Upcoming (capability layer):** Phase 4 — wrapped-line virtualization (lazy
+byte→line index for one enormous flowed document); then Phase 5 — runaround
+(slot-stream flow around floating tiles), the first time §3.15 and §3.16 combine.
+
+See `docs/tiling-engine-roadmap.md` and `docs/mullion-design-note.md` for the full
+plans and open design questions. This manual tracks the public API as each phase
+merges.

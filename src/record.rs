@@ -100,6 +100,14 @@ pub trait RecordSource {
     /// One materialized row handed back to the consumer.
     type Row;
 
+    /// The ordering key of a materialized row.
+    ///
+    /// Keyset paging is anchored by key, so the consumer must be able to recover
+    /// the key of a row it already holds in order to fetch the next or previous
+    /// window. A row therefore carries (or can derive) its own key — the SQL key
+    /// column, the LDAP DN, and so on.
+    fn key_of(&self, row: &Self::Row) -> Self::Key;
+
     /// Fetch up to `n` rows whose key is immediately **after** `key`, in
     /// ascending key order.
     ///
@@ -133,6 +141,105 @@ pub trait RecordSource {
     fn exact_len(&mut self) -> Option<u64>;
 }
 
+// ── VecRecordSource ──────────────────────────────────────────────────────────
+
+/// An in-memory [`RecordSource`] over a sorted vector of `(key, value)` rows.
+///
+/// This is the reference implementation: it materializes everything up front, so
+/// it is meant for tests and demos rather than large data. It still honors the
+/// seek-shaped contract — every fetch is resolved by binary search on the key,
+/// never by integer offset — so it exercises the same windowing code paths a real
+/// keyset or VLV backend would.
+///
+/// The [`Row`](RecordSource::Row) is the whole `(K, V)` pair, so
+/// [`key_of`](RecordSource::key_of) simply returns the key component.
+///
+/// By default [`exact_len`](RecordSource::exact_len) returns `Some` (an exact
+/// scrollbar). Call [`estimated`](VecRecordSource::estimated) to model a remote
+/// cursor whose length is unknown: `exact_len` then returns `None`, forcing the
+/// honest-estimate scrollbar path (§6.2).
+#[derive(Debug, Clone)]
+pub struct VecRecordSource<K, V> {
+    /// Rows sorted ascending by key; keys are assumed unique.
+    rows: Vec<(K, V)>,
+    /// Whether the source admits to knowing its exact length.
+    knows_len: bool,
+}
+
+impl<K: Ord + Clone, V: Clone> VecRecordSource<K, V> {
+    /// Build a source from `(key, value)` rows, sorting them by key.
+    pub fn new(mut rows: Vec<(K, V)>) -> Self {
+        rows.sort_by(|a, b| a.0.cmp(&b.0));
+        Self { rows, knows_len: true }
+    }
+
+    /// Model an unknown-length remote cursor: `exact_len` returns `None`, so a
+    /// consumer must fall back to the estimated scrollbar.
+    pub fn estimated(mut self) -> Self {
+        self.knows_len = false;
+        self
+    }
+
+    /// Total number of rows held (independent of the `knows_len` pretence).
+    pub fn len(&self) -> usize {
+        self.rows.len()
+    }
+
+    /// `true` when the source holds no rows.
+    pub fn is_empty(&self) -> bool {
+        self.rows.is_empty()
+    }
+}
+
+impl<K: Ord + Clone, V: Clone> RecordSource for VecRecordSource<K, V> {
+    type Key = K;
+    type Row = (K, V);
+
+    /// The key component of the `(key, value)` row.
+    fn key_of(&self, row: &(K, V)) -> K {
+        row.0.clone()
+    }
+
+    /// Rows with key strictly greater than `key` (or from the start), by binary
+    /// search — the in-memory analogue of `WHERE key > ? ORDER BY key LIMIT n`.
+    fn fetch_after(&mut self, key: Option<K>, n: usize) -> Window<(K, V)> {
+        let start = match key {
+            None => 0,
+            // First index whose key is > `k` (all keys ≤ k are skipped).
+            Some(k) => self.rows.partition_point(|(rk, _)| *rk <= k),
+        };
+        let end = (start + n).min(self.rows.len());
+        Window::new(self.rows[start..end].to_vec(), end == self.rows.len())
+    }
+
+    /// Rows with key strictly less than `key` (or the last `n`), returned in
+    /// ascending key order so windows stitch without re-sorting.
+    fn fetch_before(&mut self, key: Option<K>, n: usize) -> Window<(K, V)> {
+        let end = match key {
+            None => self.rows.len(),
+            // First index whose key is ≥ `k`; everything before it is < k.
+            Some(k) => self.rows.partition_point(|(rk, _)| *rk < k),
+        };
+        let start = end.saturating_sub(n);
+        Window::new(self.rows[start..end].to_vec(), start == 0)
+    }
+
+    /// Exact fractional position (rows strictly before `key` over the total).
+    fn approx_position(&mut self, key: &K) -> Option<f32> {
+        if self.rows.is_empty() {
+            return None;
+        }
+        let idx = self.rows.partition_point(|(rk, _)| *rk < *key);
+        Some(idx as f32 / self.rows.len() as f32)
+    }
+
+    /// `Some(len)` unless the source was put into [`estimated`](VecRecordSource::estimated)
+    /// mode.
+    fn exact_len(&mut self) -> Option<u64> {
+        self.knows_len.then_some(self.rows.len() as u64)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -158,6 +265,10 @@ mod tests {
     impl RecordSource for VecSource {
         type Key = u64;
         type Row = u64;
+
+        fn key_of(&self, row: &u64) -> u64 {
+            *row
+        }
 
         fn fetch_after(&mut self, key: Option<u64>, n: usize) -> Window<u64> {
             let start = match key {
@@ -202,5 +313,24 @@ mod tests {
 
         assert_eq!(s.exact_len(), Some(5));
         assert_eq!(s.approx_position(&30), Some(2.0 / 5.0));
+        assert_eq!(s.key_of(&30), 30);
+    }
+
+    #[test]
+    fn vec_record_source_sorts_and_keys() {
+        // Unsorted input is sorted by key; Row is the (key, value) pair.
+        let mut s = VecRecordSource::new(vec![(3, "c"), (1, "a"), (2, "b")]);
+        assert_eq!(s.fetch_after(None, 2).rows, vec![(1, "a"), (2, "b")]);
+        assert_eq!(s.key_of(&(2, "b")), 2);
+        assert_eq!(s.fetch_before(Some(3), 1).rows, vec![(2, "b")]);
+        assert_eq!(s.exact_len(), Some(3));
+    }
+
+    #[test]
+    fn vec_record_source_estimated_hides_len() {
+        let mut s = VecRecordSource::new(vec![(1, ()), (2, ())]).estimated();
+        // Length is hidden, but position estimation still works.
+        assert_eq!(s.exact_len(), None);
+        assert_eq!(s.approx_position(&2), Some(0.5));
     }
 }
