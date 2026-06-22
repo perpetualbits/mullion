@@ -770,9 +770,17 @@ around each float) is a per-query parameter. Demo: `cargo run --example floating
 
 Bidirectional, paginated paragraph wrapping. The pipeline runs per paragraph →
 per visual line: UAX #14 break opportunities → greedy width fill by
-grapheme-cluster width → UAX #9 reordering → emit cells **in visual order** (the
-terminal never reorders). It is bidi-correct from the first call; pure-LTR text
-reorders to the identity.
+grapheme-cluster width → UAX #9 reordering → emit cells **in visual order**. It is
+bidi-correct from the first call; pure-LTR text reorders to the identity.
+
+Because mullion hands the terminal cells already in visual order, it must stop a
+bidi-aware terminal (e.g. VTE — gnome-terminal, terminator) from re-ordering them
+a second time. [`CrosstermBackend`](crate::backend::CrosstermBackend) does this
+automatically: on `enter` it switches the terminal to **BDSM explicit** mode
+(`ESC[8l`) and restores the default on `leave`. This is a one-time escape with no
+per-cell cost; terminals that do not implement it ignore the mode. Without it, a
+row mixing RTL text with box-drawing borders would have the borders dragged out of
+place at display time.
 
 ```rust
 use mullion::text::{wrap, render_wrapped, BaseDirection};
@@ -877,7 +885,14 @@ The obstacle-free case is one full-width slot per row, which flows through the
 reproduces `wrap` (§3.16) line for line. Reflow on a tile drag is bounded by the
 rows you pass, not the whole document. Under an **RTL** base the within-row slot
 order flips (the right-of-tile slot fills first) — the §3.5 BiDi × runaround
-hazard, handled explicitly. Demo: `cargo run --example runaround`.
+hazard, handled explicitly.
+
+**Words are kept whole.** A word that does not fit a narrow gap between tiles is
+moved on to the next slot wide enough to hold it, rather than hard-broken
+mid-word; a word is split only when it is wider than *every* slot (so it can fit
+nowhere whole). The obstacle-free case has all slots the same width, so this
+collapses back to ordinary greedy wrapping. Demos: `cargo run --example runaround`
+(single tile) and `cargo run --example runaround_multi` (three tiles, mixed LTR/RTL).
 
 ---
 
