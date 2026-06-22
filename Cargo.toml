@@ -26,6 +26,10 @@ path = "examples/showcase.rs"
 name = "floating"
 path = "examples/floating.rs"
 
+[[example]]
+name = "text"
+path = "examples/text.rs"
+
 [dependencies]
 bitflags = "2"
 crossterm = "0.28"
