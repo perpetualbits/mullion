@@ -334,19 +334,15 @@ fn break_flags(text: &str, graphemes: &[Grapheme]) -> BreakFlags {
 /// Greedily fill graphemes into lines of at most `width` columns, returning each
 /// line as a grapheme-index range `[start, end)` (stage 2 of the pipeline).
 ///
-/// The walk keeps a running line width and the most recent allowed break within
-/// the line. When a *non-space* grapheme would overflow `width`, it wraps at that
-/// remembered break (or hard-breaks at the current grapheme if the line has no
-/// break opportunity yet). Breakable spaces never trigger a wrap — they "hang"
-/// past the edge (UAX #14 puts the break opportunity *after* trailing spaces) and
-/// are stripped by [`trim_trailing_spaces`] when each line is pushed, so trailing
-/// whitespace is consumed by the wrap rather than counted. Mandatory breaks (hard
-/// newlines) always start a new line; zero-width graphemes never overflow.
+/// A thin loop over [`fill_one_line`], which does the per-line greedy walk (where
+/// the break/space/newline rules live). Each returned line is trimmed of trailing
+/// spaces.
 ///
 /// # Degenerate case
-/// A single grapheme wider than `width` (only possible when `width < 2`) is
-/// emitted alone on its line; this is the one situation where a line may exceed
-/// `width`, and it keeps the walk making progress instead of stalling.
+/// When even the first grapheme is wider than `width` (only possible at
+/// `width < 2`), [`fill_one_line`] returns `start`; this loop emits that grapheme
+/// alone — the one situation where a line may exceed `width` — so the walk makes
+/// progress instead of stalling.
 fn fill_lines(graphemes: &[Grapheme], flags: &BreakFlags, width: u16) -> Vec<Range<usize>> {
     let n = graphemes.len();
     let target = width as u32;

@@ -70,8 +70,9 @@ pub struct PlacedLine {
 /// Build the ordered slot stream for `rows` of `parent`, after subtracting the
 /// `obstacles` (already-solved floating-child rects) grown by `gutter`.
 ///
-/// Slots are ordered top-to-bottom and **left-to-right** within a row (the LTR
-/// flow order of Stage A). The query is viewport-bounded by `rows`: pass the
+/// Slots are returned in geometric order: top-to-bottom, then **left-to-right**
+/// within a row. This is the LTR flow order; [`flow`] reverses the within-row
+/// order itself for an RTL base. The query is viewport-bounded by `rows`: pass the
 /// visible row range and the cost is paid only for those rows.
 pub fn slots_in(
     parent: Rect,
