@@ -58,6 +58,10 @@ path = "examples/graph.rs"
 name = "wires"
 path = "examples/wires.rs"
 
+[[example]]
+name = "viewport"
+path = "examples/viewport.rs"
+
 [dependencies]
 bitflags = "2"
 crossterm = "0.28"
