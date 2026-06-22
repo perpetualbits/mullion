@@ -61,6 +61,7 @@ pub mod record;
 pub mod render;
 pub mod style;
 pub mod terminal;
+pub mod text;
 pub mod theme;
 pub mod tree;
 
@@ -80,6 +81,10 @@ pub use float::{
 };
 pub use record::{RecordSource, Window};
 pub use table::{ColumnDef, ColumnGrid, ColumnKind, Table};
+pub use text::{
+    render_line, render_wrapped, shape_line, wrap, BaseDirection, CursorMap, VisualCell,
+    VisualLine, WrappedText,
+};
 pub use style::{Color, ColorDepth, Modifier, Style};
 pub use theme::Theme;
 pub use terminal::{poll_event, read_event, Terminal};
