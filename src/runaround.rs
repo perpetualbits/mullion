@@ -21,8 +21,12 @@
 //! ## BiDi × runaround
 //!
 //! Per §3.5 this is a feature-multiplication zone, landed in two stages. Stage A
-//! (this commit) is LTR: slots within a row flow left-to-right. Stage B makes the
-//! within-row slot order respect direction (RTL flows the right slot first).
+//! was LTR: slots within a row flow left-to-right. Stage B makes the within-row
+//! slot order **direction-aware**: under an RTL base the reader starts at the
+//! right-of-tile slot and moves left, so [`flow`] reverses the slot order within
+//! each row (the rows themselves still run top-to-bottom). The bidi reordering
+//! *inside* each slot is the Phase 2 machinery, unchanged — only the order in
+//! which slots are filled flips.
 
 use std::ops::Range;
 
@@ -92,9 +96,10 @@ pub fn slots_in(
 /// fall below the rows asked for). With no obstacles every row is one full-width
 /// slot, so the result matches flat wrapping.
 ///
-/// `base` selects the bidi base direction used *within* each slot. (Stage A keeps
-/// the *slot order* left-to-right regardless of `base`; Stage B will make it
-/// direction-aware.)
+/// `base` selects the bidi base direction. It governs both the reordering
+/// *within* each slot (Phase 2) and, under an RTL base, the *order of the slots*
+/// within a row: the right-of-tile slot is filled before the left-of-tile slot
+/// (§3.5). The rows themselves always run top-to-bottom.
 pub fn flow(
     text: &str,
     parent: Rect,
@@ -103,7 +108,12 @@ pub fn flow(
     base: BaseDirection,
     rows: Range<u16>,
 ) -> Vec<PlacedLine> {
-    let slots = slots_in(parent, obstacles, gutter, rows);
+    let mut slots = slots_in(parent, obstacles, gutter, rows);
+    // RTL reading order reverses the slots within each row so text flows into the
+    // right-of-tile slot first. A single-slot (obstacle-free) row is unaffected.
+    if matches!(base, BaseDirection::Rtl) {
+        reverse_within_rows(&mut slots);
+    }
     let widths: Vec<u16> = slots.iter().map(|s| s.width).collect();
     let lines = wrap_into_slots(text, &widths, base);
     slots
@@ -111,6 +121,25 @@ pub fn flow(
         .zip(lines)
         .map(|(s, line)| PlacedLine { row: s.row, col: s.col, width: s.width, line })
         .collect()
+}
+
+/// Reverse the order of slots **within each row**, leaving the top-to-bottom row
+/// order intact — the within-row flip RTL runaround needs (§3.5).
+///
+/// Slots arrive grouped by ascending row (from [`slots_in`]); each maximal run of
+/// same-row slots is reversed in place, so a row's `[left, right]` becomes
+/// `[right, left]` while rows stay in order.
+fn reverse_within_rows(slots: &mut [Slot]) {
+    let mut i = 0;
+    while i < slots.len() {
+        let row = slots[i].row;
+        let mut j = i;
+        while j < slots.len() && slots[j].row == row {
+            j += 1;
+        }
+        slots[i..j].reverse();
+        i = j;
+    }
 }
 
 // ── Rendering ────────────────────────────────────────────────────────────────
@@ -175,6 +204,56 @@ mod tests {
         assert_eq!((placed[0].col, placed[0].width), (0, 5));
     }
 
+    // ── Stage B: BiDi × runaround ─────────────────────────────────────────
+
+    /// Find the placed line whose slot left edge is `col`, on row 0.
+    fn at_col(placed: &[PlacedLine], col: u16) -> &PlacedLine {
+        placed.iter().find(|p| p.row == 0 && p.col == col).expect("slot at col")
+    }
+
+    #[test]
+    fn rtl_reverses_within_row_slot_order() {
+        // A tile at cols [5,8) on row 0 splits it into left [0,5) and right [8,12).
+        // Tokens "111 222 ..." flow left-first under LTR, right-first under RTL —
+        // the §3.5 within-row slot-order flip. (ASCII digits isolate the slot
+        // ordering from within-slot bidi, which Phase 2 already proves.)
+        let parent = Rect::new(0, 0, 12, 1);
+        let tile = Rect::new(5, 0, 3, 1);
+        let text = "111 222 333 444";
+
+        let ltr = flow(text, parent, &[tile], 0, BaseDirection::Ltr, 0..1);
+        // LTR: first token in the LEFT slot, second in the RIGHT slot.
+        assert_eq!(visual_string(&at_col(&ltr, 0).line), "111");
+        assert_eq!(visual_string(&at_col(&ltr, 8).line), "222");
+
+        let rtl = flow(text, parent, &[tile], 0, BaseDirection::Rtl, 0..1);
+        // RTL: first token in the RIGHT slot, second in the LEFT slot.
+        assert_eq!(visual_string(&at_col(&rtl, 8).line), "111");
+        assert_eq!(visual_string(&at_col(&rtl, 0).line), "222");
+    }
+
+    #[test]
+    fn rtl_flow_order_is_right_to_left() {
+        // In flow (fill) order, row 0's first slot is the rightmost under RTL.
+        let parent = Rect::new(0, 0, 12, 1);
+        let tile = Rect::new(5, 0, 3, 1);
+        let rtl = flow("aaa bbb ccc", parent, &[tile], 0, BaseDirection::Rtl, 0..1);
+        let row0: Vec<u16> = rtl.iter().filter(|p| p.row == 0).map(|p| p.col).collect();
+        assert_eq!(row0, vec![8, 0], "right slot precedes left slot under RTL");
+    }
+
+    #[test]
+    fn rtl_obstacle_free_unchanged() {
+        // With no tile, each row is one slot, so RTL reversal is a no-op on order;
+        // the result still matches an RTL flat wrap.
+        let parent = Rect::new(0, 0, 10, 3);
+        let placed = flow("aaa bbb ccc ddd", parent, &[], 0, BaseDirection::Rtl, 0..3);
+        let flat = wrap("aaa bbb ccc ddd", 10, BaseDirection::Rtl);
+        for (i, p) in placed.iter().take(flat.line_count()).enumerate() {
+            assert_eq!(visual_string(&p.line), visual_string(&flat.lines()[i]));
+        }
+    }
+
     // ── Property tests ────────────────────────────────────────────────────
 
     use proptest::prelude::*;
@@ -231,8 +310,8 @@ mod tests {
             let flat = wrap(&text, width, BaseDirection::Ltr);
             // Compare the visible window (the first `height` flat lines).
             let take = (height as usize).min(flat.line_count());
-            for i in 0..take {
-                prop_assert_eq!(visual_string(&placed[i].line), visual_string(&flat.lines()[i]));
+            for (p, flat_line) in placed.iter().zip(flat.lines()).take(take) {
+                prop_assert_eq!(visual_string(&p.line), visual_string(flat_line));
             }
         }
     }
