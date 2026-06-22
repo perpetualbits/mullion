@@ -64,6 +64,7 @@ pub mod terminal;
 pub mod text;
 pub mod theme;
 pub mod tree;
+pub mod vlist;
 
 pub use backend::{Backend, CrosstermBackend, TestBackend};
 pub use label::{draw_label, label_period, Align, Label, Side};
@@ -79,7 +80,8 @@ pub use ease::{gaussian, lerp, smoothstep};
 pub use float::{
     free_cells_in_window, free_intervals_in_rows, FloatChild, FloatLayer, FloatRect, FreeInterval,
 };
-pub use record::{RecordSource, Window};
+pub use record::{RecordSource, VecRecordSource, Window};
+pub use vlist::{render_scrollbar, ScrollMetrics, VirtualList};
 pub use table::{ColumnDef, ColumnGrid, ColumnKind, Table};
 pub use text::{
     render_line, render_wrapped, shape_line, wrap, BaseDirection, CursorMap, VisualCell,
