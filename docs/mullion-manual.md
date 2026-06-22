@@ -967,6 +967,47 @@ click-to-select and drag. The canvas uses a **fixed origin**; panning a window
 over a larger canvas and culling off-window nodes is a later phase. Sockets
 (§3.20) sit on the nodes; wiring them is Phase 8. Demo: `cargo run --example graph`.
 
+### 3.22 Connector routing — `mullion::route`
+
+Wire socket to socket with **orthogonal connector routing** (design note §5.2): a
+known-hard problem that terminal scale tames (dozens of wires over an ~80×200
+grid). `route` runs **grid A\*** over the free cells (from §3.15), with a **bend
+penalty** so the path prefers long straight runs and few corners — the "train
+tracks" look. It works in **canvas space**, so routes are stable under future
+scrolling and are recomputed on graph edits; callers reroute every frame (cheap
+at this scale).
+
+```rust
+use mullion::{Rect, route::{render as render_connectors, Connector}};
+use mullion::socket::{Socket, Flow};
+use mullion::float::free_cells_in_window;
+use mullion::label::Side;
+
+// Free cells = canvas minus the node bodies.
+let canvas = Rect::new(0, 0, 80, 24);
+let free = free_cells_in_window(canvas, &node_rects, 0, canvas).into_iter().collect();
+
+let src = Socket::new(Side::Right, 3, Flow::Out, 0);   // an output port
+let dst = Socket::new(Side::Left, 3, Flow::In, 0);     // an input port
+let wire = Connector::route(
+    &free,
+    src.attach(node_a).unwrap(),                       // start = cell outside the socket
+    dst.attach(node_b).unwrap(),                       // goal
+    /* bend penalty */ 4,
+    src.outward().opposite(), dst.outward().opposite(),// inward dirs, for the socket join
+);
+render_connectors(buf, canvas, (window.x, window.y), &[wire.unwrap()],
+                  &node_rects, LineWeight::Light, style);
+```
+
+`Socket::attach` gives the free cell just outside a socket (the routing endpoint),
+and `Socket::outward` the direction it faces. Rendering reuses the junction glyph
+logic (§3.3): every wire is laid into an `EdgeGrid` as box-drawing arms, so turns
+— and crossings between wires — resolve to the right glyph automatically. There is
+no hop-over glyph (the charset has none); a crossing that is not a join reads as a
+`┼` until Phase 9 disambiguates it with color-per-net. Demo: `cargo run --example
+wires` (drag a node and the wires reroute live).
+
 ---
 
 ## 4. API reference by module
@@ -990,12 +1031,13 @@ over a larger canvas and culling off-window nodes is a later phase. Sockets
 | `table` | `ColumnGrid` (`resolve`, `row_rects`, `write_text`, `write_number`, `write_bar`), `ColumnDef`, `ColumnKind`, `Table` (`new`, `body_area`, `render`) |
 | `float` | `FloatLayer` (`with_child`, `solve`), `FloatChild`, `FloatRect`, `FreeInterval`, `free_intervals_in_rows`, `free_cells_in_window` |
 | `graph` | `GraphCanvas` (`new`, `with_grid`, `resize`, `add`, `remove`, `place`, `nodes`, `move_to`, `nudge`, `snap_to_grid`, `solve`) |
+| `route` | `route` (grid A\* with bend penalty), `Connector` (`route`), `render` |
 | `text` | `wrap`, `wrap_into_slots`, `shape_line`, `render_wrapped`, `render_line`, `WrappedText` (`lines`, `visible`, `page`, `page_count`), `VisualLine`, `VisualCell`, `CursorMap` (`visual_to_logical`, `logical_to_visual`), `BaseDirection` |
 | `record` | `RecordSource` (`key_of`, `fetch_after`, `fetch_before`, `approx_position`, `exact_len`), `Window`, `VecRecordSource` (`new`, `estimated`) |
 | `vlist` | `VirtualList` (`visible`, `scroll_by`, `set_viewport`, `scroll_metrics`, `at_top`/`at_bottom`, `capacity`), `ScrollMetrics`, `render_scrollbar` |
 | `docview` | `DocView` (`new`, `set_width`, `scroll_by`, `scroll_to_line`, `seek_to_byte`, `line_to_byte`, `byte_to_line`, `total_lines`, `line_count_hint`, `visible_lines`), `render_doc` |
 | `runaround` | `flow`, `slots_in`, `render_flow`, `Slot`, `PlacedLine` |
-| `socket` | `Socket` (`new`, `with_length`, `gap`, `rect`, `anchor`, `pack`), `Flow`, `bookends`, `draw_socket`, `FlowStyle` (`color`) |
+| `socket` | `Socket` (`new`, `with_length`, `gap`, `rect`, `anchor`, `outward`, `attach`, `pack`), `Flow`, `bookends`, `draw_socket`, `FlowStyle` (`color`) |
 | `junction` | `EdgeGrid`, `EdgeCell`, `resolve` |
 | `label` | `draw_label`, `label_period`, `Label`, `Side`, `Align` |
 | `input` | `InputRouter`, `KeyOutcome`, `NavCommand`, `Keymap`, `MouseOutcome` (+ re-exported `KeyEvent`/`KeyCode`/`KeyModifiers`, `MouseEvent`/`MouseEventKind`/`MouseButton`) |
@@ -1017,7 +1059,8 @@ Common re-exports at the crate root: `Buffer`, `Cell`, `Node`, `Constraint`,
 `CursorMap`, `BaseDirection`, `RecordSource`, `VecRecordSource`, `Window`,
 `VirtualList`, `ScrollMetrics`, `render_scrollbar`, `DocView`, `render_doc`,
 `wrap_into_slots`, `flow`, `slots_in`, `render_flow`, `Slot`, `PlacedLine`,
-`Socket`, `Flow`, `FlowStyle`, `draw_socket`, `bookends`, `GraphCanvas`.
+`Socket`, `Flow`, `FlowStyle`, `draw_socket`, `bookends`, `GraphCanvas`, `route`,
+`Connector`, `render_connectors`.
 Module-scoped:
 `Axis`, `region_of`, `carousel_visible_range`, `solve` (`layout`);
 `Dir`/`Direction` (`tree`).
@@ -1335,6 +1378,14 @@ with `s`, or drag with the mouse. Nodes stay inside the canvas.
 cargo run --example graph
 ```
 
+**`examples/wires.rs`** — the §3.22 connector routing: three nodes wired in a
+triangle, each connector routed orthogonally around the others with grid A\*.
+Drag a node (or nudge it) and the wires reroute live around it.
+
+```text
+cargo run --example wires
+```
+
 **`examples/spiral_stress.rs`** (in the `aerie` crate) — an animated stress test
 and visual demo.  Draws a stack of nested frames arranged like a Fibonacci /
 golden-rectangle spiral that continuously uncurls and re-curls the other way
@@ -1389,10 +1440,11 @@ text engine, and node graphs on top of the tiling core):
 | 5     | `mullion::runaround` — slot-stream flow around floating tiles (`wrap_into_slots`, `flow`); LTR then BiDi × runaround; §3.19 manual |
 | 6     | `mullion::socket` — `Socket` (`BorderGap` with semantics), gap geometry + `pack`, `FlowStyle` connector-flow gradient; §3.20 manual |
 | 7     | `mullion::graph` — `GraphCanvas`: hand-placed nodes (drag / nudge / grid-snap) on a fixed-origin canvas; §3.21 manual |
+| 8     | `mullion::route` — orthogonal connector routing (grid A\* + bend penalty), canvas-space, junction-glyph rendering; `Socket::attach`/`outward`; §3.22 manual |
 
-**Upcoming (capability layer):** Phase 8 — orthogonal connector routing: grid A\*
-over the Phase 1 free-cell structure with a heavy bend penalty, in canvas space,
-wiring socket to socket ("train tracks").
+**Upcoming (capability layer):** Phase 9 — nudging + crossing resolution: spread
+parallel connectors onto separate tracks (gutter capacity), and disambiguate
+crossings with color-per-net + extended junction glyphs.
 
 See `docs/tiling-engine-roadmap.md` and `docs/mullion-design-note.md` for the full
 plans and open design questions. This manual tracks the public API as each phase

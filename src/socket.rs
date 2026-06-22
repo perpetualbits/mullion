@@ -32,6 +32,7 @@ use crate::buffer::Buffer;
 use crate::geometry::Rect;
 use crate::label::Side;
 use crate::style::{Color, Style};
+use crate::tree::Direction;
 
 // ── Flow ─────────────────────────────────────────────────────────────────────
 
@@ -166,6 +167,31 @@ impl Socket {
             out.push(Socket::new(side, offset as u16, Flow::In, 0));
         }
         out
+    }
+
+    /// The direction this socket faces, away from the tile: `Top`→`Up`,
+    /// `Bottom`→`Down`, `Left`→`Left`, `Right`→`Right`. A connector approaches
+    /// the socket along this axis.
+    pub fn outward(&self) -> Direction {
+        match self.side {
+            Side::Top => Direction::Up,
+            Side::Bottom => Direction::Down,
+            Side::Left => Direction::Left,
+            Side::Right => Direction::Right,
+        }
+    }
+
+    /// The cell just **outside** the socket — one step in the
+    /// [`outward`](Socket::outward) direction from the [`anchor`](Socket::anchor).
+    /// This is the free cell a connector routes to/from (its endpoint), so the
+    /// wire stays clear of the node's border. `None` if the socket does not fit,
+    /// or if the outward cell would fall off the coordinate origin.
+    pub fn attach(&self, tile: Rect) -> Option<(u16, u16)> {
+        let (ax, ay) = self.anchor(tile)?;
+        let (dx, dy) = self.outward().delta();
+        let x = u16::try_from(ax as i32 + dx).ok()?;
+        let y = u16::try_from(ay as i32 + dy).ok()?;
+        Some((x, y))
     }
 }
 

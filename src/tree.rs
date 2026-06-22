@@ -313,6 +313,29 @@ pub enum Direction {
     Right,
 }
 
+impl Direction {
+    /// The unit cell step for this direction as `(dx, dy)` — `Up` is `(0, -1)`,
+    /// `Down` `(0, 1)`, `Left` `(-1, 0)`, `Right` `(1, 0)`.
+    pub fn delta(self) -> (i32, i32) {
+        match self {
+            Direction::Up => (0, -1),
+            Direction::Down => (0, 1),
+            Direction::Left => (-1, 0),
+            Direction::Right => (1, 0),
+        }
+    }
+
+    /// The opposite direction (`Up`↔`Down`, `Left`↔`Right`).
+    pub fn opposite(self) -> Direction {
+        match self {
+            Direction::Up => Direction::Down,
+            Direction::Down => Direction::Up,
+            Direction::Left => Direction::Right,
+            Direction::Right => Direction::Left,
+        }
+    }
+}
+
 // ── Direction helpers ─────────────────────────────────────────────────────────
 
 /// Read the current axis without calling `resolve()` (which mutates
