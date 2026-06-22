@@ -70,6 +70,7 @@ pub mod text;
 pub mod theme;
 pub mod tree;
 pub mod vlist;
+pub mod zoom;
 
 pub use backend::{Backend, CrosstermBackend, TestBackend};
 pub use label::{draw_label, label_period, Align, Label, Side};
@@ -92,6 +93,7 @@ pub use route::{render as render_connectors, route, route_all, Connector, RouteR
 pub use runaround::{flow, render_flow, slots_in, PlacedLine, Slot};
 pub use socket::{bookends, draw_socket, Flow, FlowStyle, Socket};
 pub use vlist::{render_scrollbar, ScrollMetrics, VirtualList};
+pub use zoom::{lerp_rect, FocusTarget, Lod, LodScale, Zoom};
 pub use table::{ColumnDef, ColumnGrid, ColumnKind, Table};
 pub use text::{
     render_line, render_wrapped, shape_line, wrap, wrap_into_slots, BaseDirection, CursorMap,
