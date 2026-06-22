@@ -54,6 +54,10 @@ path = "examples/sockets.rs"
 name = "graph"
 path = "examples/graph.rs"
 
+[[example]]
+name = "wires"
+path = "examples/wires.rs"
+
 [dependencies]
 bitflags = "2"
 crossterm = "0.28"
