@@ -50,12 +50,14 @@ pub mod buffer;
 pub mod capabilities;
 pub mod charset;
 pub mod ease;
+pub mod float;
 pub mod geometry;
 pub mod input;
 pub mod junction;
 pub mod label;
 pub mod layout;
 pub mod mouse;
+pub mod record;
 pub mod render;
 pub mod style;
 pub mod terminal;
@@ -73,6 +75,10 @@ pub use layout::{carousel_visible_range, region_of, Constraint, Node, Orientatio
 pub use capabilities::Capabilities;
 pub use charset::box_to_ascii;
 pub use ease::{gaussian, lerp, smoothstep};
+pub use float::{
+    free_cells_in_window, free_intervals_in_rows, FloatChild, FloatLayer, FloatRect, FreeInterval,
+};
+pub use record::{RecordSource, Window};
 pub use table::{ColumnDef, ColumnGrid, ColumnKind, Table};
 pub use style::{Color, ColorDepth, Modifier, Style};
 pub use theme::Theme;
