@@ -31,6 +31,21 @@ use crate::{
 const BEGIN_SYNC: &[u8] = b"\x1b[?2026h";
 const END_SYNC: &[u8] = b"\x1b[?2026l";
 
+// Bi-Directional Support Mode (BDSM — ECMA-48 mode 8), as implemented by VTE
+// (gnome-terminal, terminator, …) and other bidi-aware terminals.
+//
+// mullion's text engine already emits cells in **visual** order (UAX #9 applied
+// per line; see `text`), so we ask the terminal for the EXPLICIT setting: do not
+// apply your own implicit BiDi reordering, render what you receive. Without this,
+// a row that mixes an RTL run with bidi-neutral box-drawing glyphs gets the box
+// characters dragged into the RTL run at scanout, so borders appear to "break".
+//
+// This is a one-time switch at `enter()` (no per-cell cost), restored to the
+// common IMPLICIT default on `leave()`. Terminals that do not implement BDSM
+// ignore the unknown mode, so it is harmless everywhere.
+const BDSM_EXPLICIT: &[u8] = b"\x1b[8l";
+const BDSM_IMPLICIT: &[u8] = b"\x1b[8h";
+
 /// A [`Backend`] that drives a real terminal via `crossterm`.
 ///
 /// ## Lifecycle
@@ -160,11 +175,17 @@ impl<W: Write> CrosstermBackend<W> {
     /// sink.  [`leave`](Backend::leave) calls `write_restore` and then
     /// `disable_raw_mode`.
     fn write_restore(&mut self) -> io::Result<()> {
+        // Restore implicit BiDi on the alternate screen, leave it, then restore it
+        // on the primary screen too — both were set explicit in `enter`, so the
+        // user's shell is not left with reordering disabled.
+        self.writer.write_all(BDSM_IMPLICIT)?;
         if self.mouse_enabled {
-            execute!(self.writer, DisableMouseCapture, LeaveAlternateScreen, Show)
+            execute!(self.writer, DisableMouseCapture, LeaveAlternateScreen, Show)?;
         } else {
-            execute!(self.writer, LeaveAlternateScreen, Show)
+            execute!(self.writer, LeaveAlternateScreen, Show)?;
         }
+        self.writer.write_all(BDSM_IMPLICIT)?;
+        Ok(())
     }
 
     /// Simulate having entered interactive mode without calling `enable_raw_mode`.
@@ -353,7 +374,9 @@ impl<W: Write> Backend for CrosstermBackend<W> {
     /// 1. Enable raw mode so keystrokes are delivered immediately without
     ///    line-editing or echoing.
     /// 2. Enter the alternate screen buffer so the normal shell output is
-    ///    preserved and restored on exit.
+    ///    preserved and restored on exit, then switch the terminal to BDSM
+    ///    *explicit* mode so it does not re-apply BiDi to mullion's already
+    ///    visual-ordered cells (see [`BDSM_EXPLICIT`]).
     /// 3. Hide the cursor to prevent it from flickering over the UI.
     /// 4. Enable mouse capture (if [`mouse_enabled`](CrosstermBackend::set_mouse_capture)
     ///    is `true`) so click and scroll events are delivered.
@@ -369,7 +392,14 @@ impl<W: Write> Backend for CrosstermBackend<W> {
     /// installed.
     fn enter(&mut self) -> io::Result<()> {
         enable_raw_mode()?;
+        // Tell bidi-aware terminals (VTE: gnome-terminal, terminator, …) not to
+        // reorder — mullion supplies cells in visual order. VTE tracks BDSM per
+        // screen buffer, so set it on the primary screen first, then again on the
+        // alternate screen after switching; setting it only after the switch does
+        // not stick. Restored on both in `write_restore`.
+        self.writer.write_all(BDSM_EXPLICIT)?;
         execute!(self.writer, EnterAlternateScreen, Hide)?;
+        self.writer.write_all(BDSM_EXPLICIT)?;
         if self.mouse_enabled {
             // Enable basic button press/release, button-motion, and SGR mouse
             // (extended coords for wide terminals).
@@ -386,6 +416,7 @@ impl<W: Write> Backend for CrosstermBackend<W> {
         std::panic::set_hook(Box::new(move |info| {
             // These are best-effort; the main cleanup path is the Drop impl.
             let _ = disable_raw_mode();
+            let _ = std::io::stderr().write_all(BDSM_IMPLICIT);
             if mouse_enabled_for_hook {
                 let _ = execute!(std::io::stderr(), DisableMouseCapture, LeaveAlternateScreen, Show);
             } else {
@@ -439,6 +470,8 @@ mod tests {
         assert!(out.contains("\x1b[?25h"), "missing show-cursor in: {out:?}");
         // Default mouse_enabled=true → leave must also disable mouse capture.
         assert!(out.contains("\x1b[?1000l"), "missing disable-mouse in: {out:?}");
+        // BiDi support mode is restored to the terminal's implicit default.
+        assert!(out.contains("\x1b[8h"), "missing BDSM-implicit restore in: {out:?}");
     }
 
     #[test]
