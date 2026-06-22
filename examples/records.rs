@@ -147,7 +147,7 @@ fn render(buf: &mut Buffer, st: &mut State) {
         ColumnGrid::write_text(buf, r[2], y, &value.to_string(), Align::End, row_style);
     }
 
-    // Footer: which rows are shown and the total (or "≈" when length is hidden).
+    // Footer: which rows are shown and the total (or "?" when length is hidden).
     let metrics = st.list.scroll_metrics();
     let foot_style = Style::default().fg(Color::DarkGray);
     let total_str = if metrics.exact { TOTAL.to_string() } else { "?".to_string() };

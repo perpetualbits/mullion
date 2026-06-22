@@ -92,8 +92,9 @@ impl<Row> Window<Row> {
 ///
 /// # Why `&mut self`
 /// A remote source typically holds a live cursor or connection that a fetch
-/// advances or mutates, so every method takes `&mut self` rather than pretending
-/// the source is pure.
+/// advances or mutates, so the fetch and query methods take `&mut self` rather
+/// than pretending the source is pure. [`key_of`](RecordSource::key_of) is the
+/// exception: it only reads a row the caller already holds, so it takes `&self`.
 pub trait RecordSource {
     /// The ordering key that anchors a fetch (e.g. a primary key or LDAP DN).
     type Key;

@@ -34,7 +34,7 @@
 use crate::buffer::Buffer;
 use crate::geometry::Rect;
 use crate::record::RecordSource;
-use crate::style::Style;
+use crate::style::{Modifier, Style};
 
 // ── VirtualList ──────────────────────────────────────────────────────────────
 
@@ -65,10 +65,11 @@ pub struct VirtualList<S: RecordSource> {
 impl<S: RecordSource> VirtualList<S> {
     /// Create a list showing `viewport` rows, refilling `batch` rows at a time.
     ///
-    /// The window capacity is `max(viewport + 2 * batch, …)` so that after a
-    /// refill there is always slack outside the viewport to trim, keeping the
-    /// window bounded without ever dropping a visible row. `viewport` and `batch`
-    /// are floored at 1.
+    /// The window capacity is `viewport + 2 * batch` so that after a refill there
+    /// is always slack outside the viewport to trim, keeping the window bounded
+    /// without ever dropping a visible row. `viewport` and `batch` are each
+    /// floored to a minimum of 1. [`set_viewport`](VirtualList::set_viewport) may
+    /// later raise the capacity to preserve this margin if the viewport grows.
     ///
     /// The initial window is fetched from the start of the source.
     pub fn new(mut source: S, viewport: usize, batch: usize) -> Self {
@@ -274,11 +275,12 @@ pub struct ScrollMetrics {
 
 /// Draw a vertical scrollbar for `metrics` into the (1-column-wide) `rect`.
 ///
-/// The track is drawn faintly; the thumb sits at `metrics.position` and spans
-/// `metrics.extent` of the track (at least one cell). When `metrics.exact` is
-/// `false` the thumb uses a **lighter shade glyph** (`▒` instead of `█`) so an
-/// estimated position is visibly distinct from a true one (§6.2). `style` colors
-/// the thumb; the track is drawn in the same color but dimmed via the track glyph.
+/// The thumb sits at `metrics.position` and spans `metrics.extent` of the track
+/// (at least one cell). When `metrics.exact` is `false` the thumb uses a
+/// **lighter shade glyph** (`▒` instead of `█`) so an estimated position is
+/// visibly distinct from a true one (§6.2). `style` colors both the thumb and the
+/// track; the track is drawn in that color with a [`Modifier::DIM`] and a thinner
+/// glyph (`│`) so it recedes behind the thumb.
 ///
 /// Does nothing for a zero-height rect.
 pub fn render_scrollbar(buf: &mut Buffer, rect: Rect, metrics: ScrollMetrics, style: Style) {
@@ -304,7 +306,8 @@ pub fn render_scrollbar(buf: &mut Buffer, rect: Rect, metrics: ScrollMetrics, st
         let (glyph, st) = if in_thumb {
             (thumb_glyph, style)
         } else {
-            (track_glyph, style)
+            // The track recedes behind the thumb: same color, dimmed.
+            (track_glyph, style.add_modifier(Modifier::DIM))
         };
         buf.set_grapheme(rect.x, y, glyph, st);
     }

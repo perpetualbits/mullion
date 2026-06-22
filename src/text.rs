@@ -538,9 +538,10 @@ pub fn wrap(text: &str, width: u16, base: BaseDirection) -> WrappedText {
 /// chrome-adjacent content such as a table cell or a flowing label (§3.3/§6.3).
 ///
 /// No wrapping is performed: the whole string becomes one [`VisualLine`] in
-/// visual order. `width` is advisory — a renderer clips the returned cells to it
-/// (see [`render_line`]); this keeps cell↔source mapping intact rather than
-/// truncating the model. `base` selects the base direction as in [`wrap`].
+/// visual order. The `_width` argument is accepted for call-site symmetry with
+/// [`wrap`] but is intentionally unused — the line is returned unclipped so the
+/// cell↔source mapping stays intact; a renderer (e.g. [`render_line`]) clips to
+/// the target width instead. `base` selects the base direction as in [`wrap`].
 pub fn shape_line(text: &str, _width: u16, base: BaseDirection) -> VisualLine {
     if text.is_empty() {
         return VisualLine {
