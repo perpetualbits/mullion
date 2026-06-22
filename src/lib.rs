@@ -53,6 +53,7 @@ pub mod docview;
 pub mod ease;
 pub mod float;
 pub mod geometry;
+pub mod graph;
 pub mod input;
 pub mod junction;
 pub mod label;
@@ -84,6 +85,7 @@ pub use ease::{gaussian, lerp, smoothstep};
 pub use float::{
     free_cells_in_window, free_intervals_in_rows, FloatChild, FloatLayer, FloatRect, FreeInterval,
 };
+pub use graph::GraphCanvas;
 pub use record::{RecordSource, VecRecordSource, Window};
 pub use runaround::{flow, render_flow, slots_in, PlacedLine, Slot};
 pub use socket::{bookends, draw_socket, Flow, FlowStyle, Socket};
