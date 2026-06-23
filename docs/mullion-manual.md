@@ -1129,6 +1129,49 @@ not on current positions — so re-running reproduces the same placement. At ter
 scale it skips dummy nodes for long edges; the connector router (§3.22) draws the
 actual wires. Demo: `cargo run --example autolayout` (`a` lays out, `s` scatters).
 
+### 3.26 Field & the video unit — `mullion::field`
+
+A `Field` is **one surface** for everything you paint sub-cell content into — an
+ordered set of screen cells with a logical `width × height` grid over them. The same
+type is a *rectangle* (`Field::rect`, a video/effects panel) and a *strip*
+(`Field::strip`, a 1-row field over any cell path — a wire, a border-perimeter
+interval, a line of text); thick/multi-line paths extend it later. Each cell carries
+a **glyph and a colour independently**, so a separate source can drive the colour
+through whatever glyphs are there.
+
+```rust
+use mullion::{Field, Rect, BLOCK_RAMP, style::Style};
+
+let field = Field::rect(Rect::new(0, 0, 80, 24));
+let image = |u: f32, v: f32| /* intensity 0..1 at normalised (u, v) */ u;
+// The video unit — three encoders, all O(1) per cell:
+field.render_braille(buf, image, |_| Style::default());          // 2×4 dithered sub-pixels
+field.render_ramp(buf, image, &BLOCK_RAMP, |_| Style::default()); // one density glyph/cell
+field.render_glyphs(buf, image, &BLOCK_RAMP, 0.07, |_| Style::default()); // structure strokes
+```
+
+The **video unit** maps an image — any `intensity(u, v)` over the field — to cells
+three ways:
+
+- **`render_braille`** — 2×4 sub-pixels per cell, **ordered-dithered** (4×4 Bayer) so
+  the lit-dot density tracks brightness. The highest-fidelity encoder: 8× the spatial
+  resolution of a single glyph, and the dither breaks up banding.
+- **`render_ramp`** — one glyph per cell from its mean brightness (`BLOCK_RAMP` /
+  `ASCII_RAMP`).
+- **`render_glyphs`** — **structure-aware**: a flat cell becomes a brightness glyph,
+  an edge cell a directional stroke (`─ │ ╱ ╲`) running along the contour
+  (perpendicular to the local gradient) — it *evokes* the image rather than just its
+  brightness. The `edge` threshold is content-dependent (small for smooth gradients,
+  larger for sharp edges); keep the image's wavelength in **cell** units so it is
+  size-independent.
+
+All three are a handful of samples plus a direct map per cell — no per-glyph search —
+so the whole field redraws every frame cheaply. `paint` is the general per-cell hook
+the encoders build on (and the substrate for future content sources: cellular
+automata and wave colour fields, and strips for corner-crossing gaps and
+content-carrying wires). Demo: `cargo run --example video` (`space` cycles the
+encoders, `c` toggles the value→hue colour layer).
+
 ---
 
 ## 4. API reference by module
@@ -1138,6 +1181,7 @@ actual wires. Demo: `cargo run --example autolayout` (`a` lays out, `s` scatters
 | `geometry` | `Rect` (`intersection`, `contains`, `right`, `bottom`, `area`, `border_pos`, `border_len`) |
 | `style` | `Style`, `Color` (`from_hsv`, `downsample`), `ColorDepth`, `Modifier` |
 | `ease` | `smoothstep`, `lerp`, `gaussian` |
+| `field` | `Field` (`rect`, `strip`, `paint`, `render_braille`, `render_ramp`, `render_glyphs`), `BLOCK_RAMP`, `ASCII_RAMP` |
 | `theme` | `Theme` (`default`, `light`, `border_style`) |
 | `capabilities` | `Capabilities` (`detect`, `full`, `from_env`) |
 | `charset` | `box_to_ascii` |
@@ -1185,7 +1229,8 @@ Common re-exports at the crate root: `Buffer`, `Cell`, `Node`, `Constraint`,
 `Socket`, `Flow`, `FlowStyle`, `draw_socket`, `bookends`, `GraphCanvas`, `route`,
 `route_all`, `Connector`, `RouteRequest`, `render_connectors`, `Viewport`, `Lod`,
 `LodScale`, `Zoom`, `lerp_rect`, `FocusTarget`, `auto_layout`, `assign_layers`,
-`order_layers`, `crossings`, `SugiyamaParams`, `LayerDir`.
+`order_layers`, `crossings`, `SugiyamaParams`, `LayerDir`, `Field`, `BLOCK_RAMP`,
+`ASCII_RAMP`.
 Module-scoped:
 `Axis`, `region_of`, `carousel_visible_range`, `solve` (`layout`);
 `Dir`/`Direction` (`tree`).
@@ -1537,6 +1582,15 @@ left-to-right layers, gliding into place; the result lives on a pannable canvas.
 cargo run --example autolayout
 ```
 
+**`examples/video.rs`** — the §3.26 Field video unit: an animated plasma sampled as
+an image and drawn into a `Field`, cycling (`space`) through the three encoders —
+dithered braille, density ramp, structure-aware glyphs — with a separable value→hue
+colour layer (`c` toggles colour).
+
+```text
+cargo run --example video
+```
+
 **`examples/spiral_stress.rs`** (in the `aerie` crate) — an animated stress test
 and visual demo.  Draws a stack of nested frames arranged like a Fibonacci /
 golden-rectangle spiral that continuously uncurls and re-curls the other way
@@ -1601,6 +1655,11 @@ text engine, and node graphs on top of the tiling core):
 a sub-tile that is itself a graph *and* a node in its parent (hierarchical layout
 with port constraints), and fan-out as a rectilinear Steiner tree. Deferred by
 design — not in v1.
+
+**Beyond the design note:** the `mullion::field` surface (§3.26) begins a unified
+**Field** direction — one surface for video (the braille / ramp / glyph encoders),
+and the substrate for corner-crossing gaps and content-carrying wires (strips), and
+cellular-automata / wave colour sources. Not part of the 13-phase plan.
 
 See `docs/tiling-engine-roadmap.md` and `docs/mullion-design-note.md` for the full
 plans and open design questions. This manual tracks the public API as each phase

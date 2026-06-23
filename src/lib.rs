@@ -51,6 +51,7 @@ pub mod capabilities;
 pub mod charset;
 pub mod docview;
 pub mod ease;
+pub mod field;
 pub mod float;
 pub mod geometry;
 pub mod graph;
@@ -85,6 +86,7 @@ pub use capabilities::Capabilities;
 pub use charset::box_to_ascii;
 pub use docview::{render_doc, DocView};
 pub use ease::{gaussian, lerp, smoothstep};
+pub use field::{Field, ASCII_RAMP, BLOCK_RAMP};
 pub use float::{
     free_cells_in_window, free_intervals_in_rows, FloatChild, FloatLayer, FloatRect, FreeInterval,
 };
