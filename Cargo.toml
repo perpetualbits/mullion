@@ -70,6 +70,10 @@ path = "examples/zoom.rs"
 name = "autolayout"
 path = "examples/autolayout.rs"
 
+[[example]]
+name = "video"
+path = "examples/video.rs"
+
 [dependencies]
 bitflags = "2"
 crossterm = "0.28"
