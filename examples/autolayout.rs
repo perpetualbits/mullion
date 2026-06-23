@@ -12,7 +12,8 @@
 //!
 //! Keys
 //!   a              auto-layout (Sugiyama)
-//!   r              refine (hill-climb the score under the active taste)
+//!   r              refine (greedy hill-climb under the active taste)
+//!   n              anneal (escapes local minima greedy can't)
 //!   w              cycle the weight taste (default / two learned tastes)
 //!   s              scatter
 //!   ← ↓ ↑ → / hjkl  pan
@@ -29,7 +30,7 @@ use mullion::{
     float::free_cells_in_window,
     label::Side,
     poll_event,
-    refine::{learn_weights, refine, score, Preference, ScoreWeights},
+    refine::{anneal, learn_weights, refine, score, AnnealParams, Preference, ScoreWeights},
     route::{render as render_connectors, route_all, Connector, RouteRequest},
     socket::{draw_socket, Flow, Socket},
     style::{Color, Modifier, Style},
@@ -161,7 +162,7 @@ fn render(buf: &mut Buffer, st: &mut State) {
 
     // ── Help & status ──────────────────────────────────────────────────────
     let s = score(&st.canvas, &st.edges, st.weights());
-    buf.set_string(0, 0, "autolayout — a:layout  r:refine  w:taste  s:scatter  hjkl/arrows:pan  q:quit",
+    buf.set_string(0, 0, "autolayout — a:layout  r:refine  n:anneal  w:taste  s:scatter  hjkl/arrows:pan  q:quit",
         Style::default().fg(Color::White).add_modifier(Modifier::BOLD));
     let status = format!(" taste: {}   {} crossings  len {:.0}  score {:.0}",
         st.tastes[st.active].0, s.crossings, s.length, s.total);
@@ -216,6 +217,7 @@ fn run(term: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<()> {
                 KeyCode::Char('q') => break,
                 KeyCode::Char('a') => st.target = layout_targets(&st),
                 KeyCode::Char('r') => st.target = refine_targets(&st),
+                KeyCode::Char('n') => st.target = anneal_targets(&st),
                 KeyCode::Char('w') => {
                     st.active = (st.active + 1) % st.tastes.len();
                     st.target = refine_targets(&st); // re-refine under the new taste
@@ -246,6 +248,13 @@ fn layout_targets(st: &State) -> HashMap<TileId, FloatRect> {
 fn refine_targets(st: &State) -> HashMap<TileId, FloatRect> {
     let mut tmp = st.canvas.clone();
     refine(&mut tmp, &st.edges, st.weights(), 30);
+    tmp.nodes().iter().map(|n| (n.id, n.place)).collect()
+}
+
+/// Anneal the current layout (escapes the local minima greedy refine gets stuck in).
+fn anneal_targets(st: &State) -> HashMap<TileId, FloatRect> {
+    let mut tmp = st.canvas.clone();
+    anneal(&mut tmp, &st.edges, st.weights(), AnnealParams::default());
     tmp.nodes().iter().map(|n| (n.id, n.place)).collect()
 }
 
