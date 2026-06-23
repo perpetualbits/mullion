@@ -1189,6 +1189,26 @@ field.render_braille_xy(buf, image, |_value, _u, v| {
 });
 ```
 
+**Strips & perimeters.** A *strip* is a 1-row Field whose cells trace a **path**
+rather than a grid — and every encoder and `paint` works on it unchanged, walking the
+path as logical column `0..width`. Two constructors build the useful ones:
+
+- **`Field::strip(cells)`** — an arbitrary ordered path. A routed wire is one
+  directly: `Field::strip(connector.path.clone())` runs a strip along the wire, so it
+  can **carry content** (a label, a flowing wave, a video band) the length of the
+  wire, bends and all.
+- **`Field::perimeter(rect)`** — the box's border cells, clockwise from the top-left,
+  **crossing all four corners** (`width = 2·(w+h) − 4`). This is the strip behind
+  *gaps that move across corners*: paint a sliding window of the perimeter — a
+  marquee, a highlight band, a gap — and it travels around the border continuously,
+  turning each corner without a break. The loop is left open (the start is not
+  repeated), so wrap by taking the column index modulo `width`.
+
+Because a strip is just a Field, **content along a wire or border is the same code as
+content in a panel** — text, the brightness ramp, dithered braille, or positional
+colour all apply. Demo: `cargo run --example strips` (a marquee orbiting a box and a
+video wave flowing along a bent wire).
+
 ### 3.27 Layout quality & refinement — `mullion::refine`
 
 A layout's quality is a **weighted sum of measurable aesthetic criteria** — the
@@ -1259,7 +1279,7 @@ edge ever crosses a node — carries no signal and keeps a small bounded weight.
 | `geometry` | `Rect` (`intersection`, `contains`, `right`, `bottom`, `area`, `border_pos`, `border_len`) |
 | `style` | `Style`, `Color` (`from_hsv`, `downsample`), `ColorDepth`, `Modifier` |
 | `ease` | `smoothstep`, `lerp`, `gaussian` |
-| `field` | `Field` (`rect`, `strip`, `paint`, `render_braille`/`_xy`, `render_ramp`/`_xy`, `render_glyphs`/`_xy`), `BLOCK_RAMP`, `ASCII_RAMP` |
+| `field` | `Field` (`rect`, `strip`, `perimeter`, `paint`, `render_braille`/`_xy`, `render_ramp`/`_xy`, `render_glyphs`/`_xy`), `BLOCK_RAMP`, `ASCII_RAMP` |
 | `theme` | `Theme` (`default`, `light`, `border_style`) |
 | `capabilities` | `Capabilities` (`detect`, `full`, `from_env`) |
 | `charset` | `box_to_ascii` |
@@ -1673,6 +1693,14 @@ colour layer (`c` toggles colour).
 
 ```text
 cargo run --example video
+```
+
+**`examples/strips.rs`** — the §3.26 strip primitives: a text **marquee** running
+around a box's border perimeter (turning every corner) and a **video brightness wave**
+flowing along a bent wire — content carried along a path, corners and bends included.
+
+```text
+cargo run --example strips
 ```
 
 **`examples/teach.rs`** — the §3.27 learnable layout, interactive: the engine lays a
