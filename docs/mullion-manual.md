@@ -1172,6 +1172,23 @@ automata and wave colour fields, and strips for corner-crossing gaps and
 content-carrying wires). Demo: `cargo run --example video` (`space` cycles the
 encoders, `c` toggles the value→hue colour layer).
 
+**Positional colour.** Each encoder's `style` closure receives only the cell's
+brightness, so it can colour by a ramp but not by *where* a cell is. For a multi-hue
+**scene** — blue sky above, orange sand below, brown cliffs straddling the horizon —
+use the `_xy` variants (`render_braille_xy`, `render_ramp_xy`, `render_glyphs_xy`),
+whose colour closure is `Fn(value, u, v)`: `value` is the same brightness as before,
+and `(u, v)` is the cell's normalised centre `((col + 0.5)/width, (row + 0.5)/height)`
+— the same `[0, 1]` space the image is sampled in. The base methods just delegate to
+these with a position-ignoring closure, so the glyph logic lives in one place.
+
+```rust
+// Colour the dots by position (sky / horizon / sand), brightness from the image:
+field.render_braille_xy(buf, image, |_value, _u, v| {
+    let hue = if v < 0.45 { 210.0 } else if v < 0.55 { 25.0 } else { 40.0 };
+    Style::default().fg(Color::from_hsv(hue, 0.7, 0.9))
+});
+```
+
 ### 3.27 Layout quality & refinement — `mullion::refine`
 
 A layout's quality is a **weighted sum of measurable aesthetic criteria** — the
@@ -1239,7 +1256,7 @@ engine with no neural net, on this deterministic scaffolding. Demo: `cargo run
 | `geometry` | `Rect` (`intersection`, `contains`, `right`, `bottom`, `area`, `border_pos`, `border_len`) |
 | `style` | `Style`, `Color` (`from_hsv`, `downsample`), `ColorDepth`, `Modifier` |
 | `ease` | `smoothstep`, `lerp`, `gaussian` |
-| `field` | `Field` (`rect`, `strip`, `paint`, `render_braille`, `render_ramp`, `render_glyphs`), `BLOCK_RAMP`, `ASCII_RAMP` |
+| `field` | `Field` (`rect`, `strip`, `paint`, `render_braille`/`_xy`, `render_ramp`/`_xy`, `render_glyphs`/`_xy`), `BLOCK_RAMP`, `ASCII_RAMP` |
 | `theme` | `Theme` (`default`, `light`, `border_style`) |
 | `capabilities` | `Capabilities` (`detect`, `full`, `from_env`) |
 | `charset` | `box_to_ascii` |
