@@ -11,12 +11,15 @@
 //! - **glyphs** — structure-aware matching: flat cells get a brightness glyph, edge
 //!   cells get a directional stroke (`─ │ ╱ ╲`) tracing the contour.
 //!
-//! The glyph carries the *shape*; a separate colour layer (value → hue) shines
-//! through it — the glyph and the colour are independent.
+//! The glyph carries the *shape*; a separate colour layer shines through it. `c`
+//! cycles three colour modes — grey, value→hue (by brightness), and **scene** (by
+//! *position*: blue sky above, orange horizon, sand below) — the last via the `_xy`
+//! encoder variants, showing colour that depends on where a cell is, not just how
+//! bright.
 //!
 //! Keys
 //!   space          cycle encoder (braille → ramp → glyphs)
-//!   c              toggle colour
+//!   c              cycle colour (grey → value→hue → scene-by-position)
 //!   q              quit
 
 use std::{io, time::Duration};
@@ -31,11 +34,13 @@ use mullion::{
 };
 
 const ENCODERS: [&str; 3] = ["braille (dithered 2×4)", "ramp (density)", "glyphs (structure)"];
+const COLOURS: [&str; 3] = ["grey", "value→hue", "scene (by position)"];
 
 struct State {
     t: f32,
     encoder: usize,
-    colour: bool,
+    /// 0 = grey, 1 = colour by brightness, 2 = colour by *position* (a scene).
+    colour: usize,
 }
 
 /// A plasma intensity field, animated by `t`. `x, y` are in **cell** units so its
@@ -59,26 +64,32 @@ fn render(buf: &mut Buffer, st: &State) {
     let (fw, fh) = (field.width() as f32, field.height() as f32);
     let img = |u: f32, v: f32| plasma(u * fw, v * fh, t);
     let colour = st.colour;
-    // value → hue: a moving colour band that shines through the glyphs.
-    let style = move |m: f32| {
-        if colour {
-            let hue = (m * 140.0 + t * 25.0) % 360.0;
-            Style::default().fg(Color::from_hsv(hue, 0.85, 0.45 + 0.5 * m))
-        } else {
+    // The colour closure takes (value, u, v): grey or value→hue ignore position;
+    // "scene" colours by v (sky blue above, orange horizon, sand below) with the
+    // image only supplying brightness — that is what positional colour buys you.
+    let style = move |m: f32, _u: f32, v: f32| match colour {
+        0 => {
             let g = (m * 255.0) as u8;
             Style::default().fg(Color::Rgb(g, g, g))
         }
+        1 => {
+            let hue = (m * 140.0 + t * 25.0) % 360.0;
+            Style::default().fg(Color::from_hsv(hue, 0.85, 0.45 + 0.5 * m))
+        }
+        _ => {
+            let hue = if v < 0.40 { 210.0 } else if v < 0.55 { 25.0 } else { 42.0 };
+            Style::default().fg(Color::from_hsv(hue, 0.7, 0.35 + 0.55 * m))
+        }
     };
     match st.encoder {
-        0 => field.render_braille(buf, img, style),
-        1 => field.render_ramp(buf, img, &BLOCK_RAMP, style),
-        _ => field.render_glyphs(buf, img, &BLOCK_RAMP, 0.07, style),
+        0 => field.render_braille_xy(buf, img, style),
+        1 => field.render_ramp_xy(buf, img, &BLOCK_RAMP, style),
+        _ => field.render_glyphs_xy(buf, img, &BLOCK_RAMP, 0.07, style),
     }
 
     buf.set_string(0, 0, "video — space:encoder  c:colour  q:quit",
         Style::default().fg(Color::White).add_modifier(Modifier::BOLD));
-    let status = format!(" encoder: {}   colour: {}",
-        ENCODERS[st.encoder], if st.colour { "on" } else { "grey" });
+    let status = format!(" encoder: {}   colour: {}", ENCODERS[st.encoder], COLOURS[st.colour]);
     let sstyle = Style::default().fg(Color::Black).bg(Color::Gray);
     for x in 0..area.width {
         buf.set_string(x, area.height - 1, " ", sstyle);
@@ -96,7 +107,7 @@ fn main() -> io::Result<()> {
 }
 
 fn run(term: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<()> {
-    let mut st = State { t: 0.0, encoder: 0, colour: true };
+    let mut st = State { t: 0.0, encoder: 0, colour: 1 };
     loop {
         term.draw(|buf| render(buf, &st))?;
         match poll_event(Duration::from_millis(33))? {
@@ -104,7 +115,7 @@ fn run(term: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<()> {
             Some(Event::Key(KeyEvent { code, .. })) => match code {
                 KeyCode::Char('q') => break,
                 KeyCode::Char(' ') => st.encoder = (st.encoder + 1) % ENCODERS.len(),
-                KeyCode::Char('c') => st.colour = !st.colour,
+                KeyCode::Char('c') => st.colour = (st.colour + 1) % COLOURS.len(),
                 _ => {}
             },
             _ => {}
