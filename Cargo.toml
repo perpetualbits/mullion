@@ -75,6 +75,10 @@ name = "video"
 path = "examples/video.rs"
 
 [[example]]
+name = "strips"
+path = "examples/strips.rs"
+
+[[example]]
 name = "teach"
 path = "examples/teach.rs"
 

@@ -60,9 +60,56 @@ impl Field {
 
     /// A 1-row field over an arbitrary ordered cell path (a strip): a wire, a
     /// border-perimeter interval, a line of text. `width = cells.len()`, `height = 1`.
+    ///
+    /// A routed connector is one directly: `Field::strip(connector.path.clone())`
+    /// gives a strip running along the wire, so it can **carry content** (a label, a
+    /// flowing animation, a video band) along its length.
     pub fn strip(cells: Vec<(u16, u16)>) -> Self {
         let width = cells.len() as u16;
         Self { cells, width, height: 1 }
+    }
+
+    /// A 1-row field tracing the **border perimeter** of `area`, clockwise from the
+    /// top-left corner — a strip that **crosses all four corners**, so content runs
+    /// continuously around the box and turns at the corners without a break. This is
+    /// the strip behind *gaps that move across corners*: paint a sliding window of the
+    /// perimeter and the gap (or a marquee, or a band) travels around the border,
+    /// corners and all.
+    ///
+    /// `width` is the border-cell count `2·(w + h) − 4` for `w, h ≥ 2`; a degenerate
+    /// single row or column (which has no corners) is simply its straight run of
+    /// cells. `height = 1`. The cells are distinct — the loop is left *open* (it does
+    /// not repeat the start), so a caller that wants to wrap takes the column index
+    /// modulo [`width`](Field::width).
+    pub fn perimeter(area: Rect) -> Self {
+        let mut cells = Vec::new();
+        if area.width == 0 || area.height == 0 {
+            return Self::strip(cells);
+        }
+        let (x0, y0) = (area.x, area.y);
+        let (x1, y1) = (area.right() - 1, area.bottom() - 1); // inclusive far corners
+        if area.width == 1 || area.height == 1 {
+            // Degenerate: a single row or column has no corners — just its cells.
+            for y in y0..=y1 {
+                for x in x0..=x1 {
+                    cells.push((x, y));
+                }
+            }
+            return Self::strip(cells);
+        }
+        for x in x0..=x1 {
+            cells.push((x, y0)); // top edge, left → right
+        }
+        for y in (y0 + 1)..=y1 {
+            cells.push((x1, y)); // right edge, top → bottom
+        }
+        for x in (x0..x1).rev() {
+            cells.push((x, y1)); // bottom edge, right → left
+        }
+        for y in ((y0 + 1)..y1).rev() {
+            cells.push((x0, y)); // left edge, bottom → top
+        }
+        Self::strip(cells)
     }
 
     /// Logical width (columns).
@@ -403,6 +450,36 @@ mod tests {
         // Flat field → no edge → a ramp glyph for the density.
         term.draw(|buf| f.render_glyphs(buf, |_, _| 0.5, &BLOCK_RAMP, 0.1, |_| Style::default())).unwrap();
         assert!(BLOCK_RAMP.contains(&sym(&term).chars().next().unwrap()));
+    }
+
+    #[test]
+    fn perimeter_traces_clockwise_corners_without_repeats() {
+        // 4×3 box → border-cell count 2·(4+3) − 4 = 10, clockwise from the top-left.
+        let f = Field::perimeter(Rect::new(0, 0, 4, 3));
+        assert_eq!(f.width(), 10);
+        assert_eq!(f.height(), 1);
+        assert_eq!(
+            f.cells(),
+            &[
+                (0, 0), (1, 0), (2, 0), (3, 0), // top → right
+                (3, 1), (3, 2), // right edge down
+                (2, 2), (1, 2), (0, 2), // bottom ← left
+                (0, 1), // left edge up, back toward start
+            ]
+        );
+        // Distinct cells (the loop is open — start not repeated).
+        let mut uniq = f.cells().to_vec();
+        uniq.sort();
+        uniq.dedup();
+        assert_eq!(uniq.len(), f.cells().len());
+    }
+
+    #[test]
+    fn perimeter_degenerate_row_and_column_are_straight_runs() {
+        let row = Field::perimeter(Rect::new(2, 5, 4, 1));
+        assert_eq!(row.cells(), &[(2, 5), (3, 5), (4, 5), (5, 5)]);
+        let col = Field::perimeter(Rect::new(2, 5, 1, 3));
+        assert_eq!(col.cells(), &[(2, 5), (2, 6), (2, 7)]);
     }
 
     #[test]
