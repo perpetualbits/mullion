@@ -1,17 +1,19 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 // Copyright (C) 2026  Epsilon Null Operation
-//! Colour sources — a [`Flame`] cellular automaton and an analytic [`Wave`] driving a
+//! Colour sources — a [`Flame`] cellular automaton, a [`Reaction`]-diffusion
+//! automaton (Gray-Scott Turing patterns), and an analytic [`Wave`] driving a
 //! [`Field`]'s **colour**, independently of its glyphs.
 //!
-//! The field's value per cell comes from the chosen source (fire heat, or a plasma
-//! wave); a [`Palette`] turns it into colour. The glyph is either a brightness block
-//! (so you see the source's shape) or tiled text (so the colour shines *through* the
-//! letters) — the glyph and the colour are separate.
+//! The field's value per cell comes from the chosen source (fire heat, a Turing
+//! pattern, or a plasma wave); a [`Palette`] turns it into colour. The glyph is either
+//! a brightness block (so you see the source's shape) or tiled text (so the colour
+//! shines *through* the letters) — the glyph and the colour are separate.
 //!
 //! Keys
-//!   s              switch source (flame ↔ wave)
+//!   s              switch source (flame → wave → reaction spots/mitosis/maze/coral)
 //!   p              cycle palette (fire → ice → rainbow)
 //!   t              toggle glyph: brightness blocks ↔ text
+//!   r              reseed the reaction-diffusion pattern
 //!   space          pause / resume
 //!   q              quit
 
@@ -24,10 +26,21 @@ use mullion::{
     colorfield::{Flame, Palette, Wave},
     poll_event,
     style::{Color, Modifier, Style},
+    colorfield::Reaction,
     Buffer, Field, Rect, Terminal, BLOCK_RAMP,
 };
 
-const SOURCES: [&str; 2] = ["flame (cellular automaton)", "wave (plasma)"];
+// Sources 0/1 are flame/wave; 2.. are reaction-diffusion presets (index − 2 into
+// REACTIONS), so `s` cycles through every source and every Turing-pattern recipe.
+const SOURCES: [&str; 6] = [
+    "flame (cellular automaton)",
+    "wave (plasma)",
+    "reaction-diffusion: spots",
+    "reaction-diffusion: mitosis",
+    "reaction-diffusion: maze",
+    "reaction-diffusion: coral",
+];
+const REACTIONS: [(f32, f32); 4] = [Reaction::SPOTS, Reaction::MITOSIS, Reaction::MAZE, Reaction::CORAL];
 const PALETTES: [Palette; 3] = [Palette::Fire, Palette::Ice, Palette::Rainbow];
 const PALETTE_NAMES: [&str; 3] = ["fire", "ice", "rainbow"];
 const MSG: &str = "MULLION·COLOUR·SOURCES·";
@@ -40,6 +53,7 @@ struct State {
     t: f32,
     flame: Flame,
     wave: Wave,
+    reaction: Reaction,
 }
 
 /// The animated area (below the help row, above the status row).
@@ -58,10 +72,10 @@ fn render(buf: &mut Buffer, st: &State) {
     let msg: Vec<char> = MSG.chars().collect();
 
     field.paint(buf, |col, row| {
-        let value = if st.source == 0 {
-            st.flame.at(col, row)
-        } else {
-            st.wave.value((col as f32 + 0.5) / w, (row as f32 + 0.5) / h, st.t)
+        let value = match st.source {
+            0 => st.flame.at(col, row),
+            1 => st.wave.value((col as f32 + 0.5) / w, (row as f32 + 0.5) / h, st.t),
+            _ => st.reaction.at(col, row),
         };
         let glyph = if st.text {
             msg[(col as usize + row as usize * 3) % msg.len()]
@@ -72,7 +86,7 @@ fn render(buf: &mut Buffer, st: &State) {
         Some((glyph.to_string(), Style::default().fg(pal.color(value))))
     });
 
-    buf.set_string(0, 0, "colour sources — s:source  p:palette  t:glyph  space:pause  q:quit",
+    buf.set_string(0, 0, "colour sources — s:source  p:palette  t:glyph  r:reseed  space:pause  q:quit",
         Style::default().fg(Color::White).add_modifier(Modifier::BOLD));
     let status = format!(" source: {}   palette: {}   glyph: {}   {}",
         SOURCES[st.source], PALETTE_NAMES[st.palette],
@@ -105,19 +119,28 @@ fn run(term: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<()> {
         t: 0.0,
         flame: Flame::new(fa.width, fa.height),
         wave: Wave::plasma(),
+        reaction: Reaction::new(fa.width, fa.height),
     };
     loop {
-        // Keep the flame grid sized to the field; advance the chosen source per frame.
+        // Keep the grids sized to the field; advance the chosen source per frame.
         let size = mullion::backend::Backend::size(term.backend())?;
         let fa = field_area(size);
         if (st.flame.width(), st.flame.height()) != (fa.width, fa.height) {
             st.flame = Flame::new(fa.width, fa.height);
+            st.reaction = Reaction::new(fa.width, fa.height);
         }
         if !st.paused {
-            if st.source == 0 {
-                st.flame.step(0.18);
+            match st.source {
+                0 => st.flame.step(0.18),
+                1 => st.t += 0.1,
+                // Reaction-diffusion blooms slowly — run several steps per frame.
+                s => {
+                    let (f, k) = REACTIONS[s - 2];
+                    for _ in 0..12 {
+                        st.reaction.step(f, k);
+                    }
+                }
             }
-            st.t += 0.1;
         }
         term.draw(|buf| render(buf, &st))?;
         if let Some(Event::Key(KeyEvent { code, .. })) = poll_event(Duration::from_millis(70))? {
@@ -126,6 +149,7 @@ fn run(term: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<()> {
                 KeyCode::Char('s') => st.source = (st.source + 1) % SOURCES.len(),
                 KeyCode::Char('p') => st.palette = (st.palette + 1) % PALETTES.len(),
                 KeyCode::Char('t') => st.text = !st.text,
+                KeyCode::Char('r') => st.reaction = Reaction::new(fa.width, fa.height),
                 KeyCode::Char(' ') => st.paused = !st.paused,
                 _ => {}
             }

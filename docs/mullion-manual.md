@@ -1212,12 +1212,19 @@ video wave flowing along a bent wire).
 **Colour sources (CA & wave) — `mullion::colorfield`.** Because a Field's glyph and
 colour are independent, the colour can come from an *animated source* that has nothing
 to do with the glyph — a value per cell, evolving over time, that a [`Palette`] turns
-into colour. Two sources:
+into colour. Three sources:
 
 - **`Flame`** — a stateful **cellular automaton** (the classic "doom fire"): a heat
   grid held hot along the bottom row and propagated upward each `step(cooling)` with
   random cooling and a one-cell drift, so flame tongues rise and flicker. `at(col,
   row)` reads the heat (`[0, 1]`); reproducible from a `seeded` PRNG.
+- **`Reaction`** — a stateful **reaction-diffusion** automaton (Gray-Scott): two
+  chemicals diffuse (a 3×3 Laplacian, one faster than the other) and react, growing
+  the organic **Turing patterns** behind animal markings — drifting spots, dividing
+  blobs, mazes, coral. The `(feed, kill)` presets `SPOTS` / `MITOSIS` / `MAZE` /
+  `CORAL` pick the pattern; `step(feed, kill)` advances it (it blooms over a few
+  hundred steps, so step several times per frame), `at(col, row)` reads `V ∈ [0, 1]`.
+  Reproducible from a `seeded` PRNG.
 - **`Wave`** — a stateless **analytic** field: summed travelling sinusoids (`plasma`
   or a slower `flag`), sampled `value(u, v, t)` — a shimmer to shine through glyphs.
 
@@ -1233,8 +1240,9 @@ field.paint(buf, |col, row| {
 });
 ```
 
-Demo: `cargo run --example colorfield` (`s` switches flame ↔ wave, `p` cycles palette,
-`t` puts the colour behind text instead of brightness blocks).
+Demo: `cargo run --example colorfield` (`s` switches source — flame, wave, then the
+four reaction-diffusion presets — `p` cycles palette, `t` puts the colour behind text
+instead of brightness blocks, `r` reseeds the reaction).
 
 ### 3.27 Layout quality & refinement — `mullion::refine`
 
@@ -1307,7 +1315,7 @@ edge ever crosses a node — carries no signal and keeps a small bounded weight.
 | `style` | `Style`, `Color` (`from_hsv`, `downsample`), `ColorDepth`, `Modifier` |
 | `ease` | `smoothstep`, `lerp`, `gaussian` |
 | `field` | `Field` (`rect`, `strip`, `perimeter`, `paint`, `render_braille`/`_xy`, `render_ramp`/`_xy`, `render_glyphs`/`_xy`), `BLOCK_RAMP`, `ASCII_RAMP` |
-| `colorfield` | `Flame` (`new`, `seeded`, `step`, `at`), `Wave` (`plasma`, `flag`, `value`), `Palette` (`Fire`/`Ice`/`Rainbow`, `color`) |
+| `colorfield` | `Flame` (`new`, `seeded`, `step`, `at`), `Reaction` (`new`, `seeded`, `step`, `at`, `SPOTS`/`MITOSIS`/`MAZE`/`CORAL`), `Wave` (`plasma`, `flag`, `value`), `Palette` (`Fire`/`Ice`/`Rainbow`, `color`) |
 | `theme` | `Theme` (`default`, `light`, `border_style`) |
 | `capabilities` | `Capabilities` (`detect`, `full`, `from_env`) |
 | `charset` | `box_to_ascii` |
@@ -1731,9 +1739,10 @@ flowing along a bent wire — content carried along a path, corners and bends in
 cargo run --example strips
 ```
 
-**`examples/colorfield.rs`** — the §3.26 colour sources: a `Flame` cellular automaton
-and an analytic `Wave` driving a `Field`'s colour through a `Palette`, independently of
-the glyph (`s` source, `p` palette, `t` blocks ↔ text).
+**`examples/colorfield.rs`** — the §3.26 colour sources: a `Flame` cellular automaton,
+a `Reaction`-diffusion automaton (Gray-Scott spots / mitosis / maze / coral), and an
+analytic `Wave` driving a `Field`'s colour through a `Palette`, independently of the
+glyph (`s` source, `p` palette, `t` blocks ↔ text, `r` reseed).
 
 ```text
 cargo run --example colorfield
