@@ -1209,6 +1209,33 @@ content in a panel** — text, the brightness ramp, dithered braille, or positio
 colour all apply. Demo: `cargo run --example strips` (a marquee orbiting a box and a
 video wave flowing along a bent wire).
 
+**Colour sources (CA & wave) — `mullion::colorfield`.** Because a Field's glyph and
+colour are independent, the colour can come from an *animated source* that has nothing
+to do with the glyph — a value per cell, evolving over time, that a [`Palette`] turns
+into colour. Two sources:
+
+- **`Flame`** — a stateful **cellular automaton** (the classic "doom fire"): a heat
+  grid held hot along the bottom row and propagated upward each `step(cooling)` with
+  random cooling and a one-cell drift, so flame tongues rise and flicker. `at(col,
+  row)` reads the heat (`[0, 1]`); reproducible from a `seeded` PRNG.
+- **`Wave`** — a stateless **analytic** field: summed travelling sinusoids (`plasma`
+  or a slower `flag`), sampled `value(u, v, t)` — a shimmer to shine through glyphs.
+
+`Palette` (`Fire`, `Ice`, `Rainbow`) maps the `[0, 1]` value to a `Color`. Neither
+source knows about `Field`: read the value per cell inside a `paint` or `render_*_xy`
+closure and colour as you like (the glyph staying text, a video frame, anything).
+
+```rust
+let mut fire = Flame::new(field.width(), field.height());
+fire.step(0.18); // once per frame
+field.paint(buf, |col, row| {
+    Some(("█".into(), Style::default().fg(Palette::Fire.color(fire.at(col, row)))))
+});
+```
+
+Demo: `cargo run --example colorfield` (`s` switches flame ↔ wave, `p` cycles palette,
+`t` puts the colour behind text instead of brightness blocks).
+
 ### 3.27 Layout quality & refinement — `mullion::refine`
 
 A layout's quality is a **weighted sum of measurable aesthetic criteria** — the
@@ -1280,6 +1307,7 @@ edge ever crosses a node — carries no signal and keeps a small bounded weight.
 | `style` | `Style`, `Color` (`from_hsv`, `downsample`), `ColorDepth`, `Modifier` |
 | `ease` | `smoothstep`, `lerp`, `gaussian` |
 | `field` | `Field` (`rect`, `strip`, `perimeter`, `paint`, `render_braille`/`_xy`, `render_ramp`/`_xy`, `render_glyphs`/`_xy`), `BLOCK_RAMP`, `ASCII_RAMP` |
+| `colorfield` | `Flame` (`new`, `seeded`, `step`, `at`), `Wave` (`plasma`, `flag`, `value`), `Palette` (`Fire`/`Ice`/`Rainbow`, `color`) |
 | `theme` | `Theme` (`default`, `light`, `border_style`) |
 | `capabilities` | `Capabilities` (`detect`, `full`, `from_env`) |
 | `charset` | `box_to_ascii` |
@@ -1701,6 +1729,14 @@ flowing along a bent wire — content carried along a path, corners and bends in
 
 ```text
 cargo run --example strips
+```
+
+**`examples/colorfield.rs`** — the §3.26 colour sources: a `Flame` cellular automaton
+and an analytic `Wave` driving a `Field`'s colour through a `Palette`, independently of
+the glyph (`s` source, `p` palette, `t` blocks ↔ text).
+
+```text
+cargo run --example colorfield
 ```
 
 **`examples/teach.rs`** — the §3.27 learnable layout, interactive: the engine lays a
