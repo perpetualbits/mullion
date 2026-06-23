@@ -74,6 +74,10 @@ path = "examples/autolayout.rs"
 name = "video"
 path = "examples/video.rs"
 
+[[example]]
+name = "teach"
+path = "examples/teach.rs"
+
 [dependencies]
 bitflags = "2"
 crossterm = "0.28"
