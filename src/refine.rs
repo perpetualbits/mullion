@@ -433,7 +433,9 @@ pub fn learn_weights(prefs: &[Preference], iters: usize, learn_rate: f32) -> Sco
         return ScoreWeights::default();
     }
     // Per-term scale (mean magnitude over all layouts) so the terms — which span
-    // wildly different ranges — are comparable during the fit.
+    // wildly different ranges — are comparable during the fit. Floored at one unit,
+    // so a term that is ~zero across every layout (no signal — e.g. no edge crosses a
+    // node) keeps a small bounded weight rather than `learned / ~0` blowing up.
     let mut scale = [0.0f32; SOFT];
     for p in prefs {
         for s in [&p.worse, &p.better] {
@@ -444,7 +446,7 @@ pub fn learn_weights(prefs: &[Preference], iters: usize, learn_rate: f32) -> Sco
         }
     }
     for s in &mut scale {
-        *s = (*s / (prefs.len() as f32 * 2.0)).max(1e-6);
+        *s = (*s / (prefs.len() as f32 * 2.0)).max(1.0);
     }
 
     // Difference vectors d = (worse − better), scaled. We want w·d > 0 for each.
@@ -646,6 +648,23 @@ mod tests {
         for v in [w.crossings, w.length, w.area, w.alignment] {
             assert!(v >= 0.0);
         }
+    }
+
+    #[test]
+    fn unobserved_term_keeps_a_bounded_weight() {
+        // `ls` sets bends and edge_node to 0, so they carry no signal across the
+        // lessons — their weights must stay bounded, not divide-by-~0 into millions.
+        let prefs: Vec<Preference> = (0..6)
+            .map(|i| Preference {
+                worse: ls(3, 240.0 + i as f32, 1300.0, 9),
+                better: ls(0, 140.0 + i as f32, 840.0, 9),
+            })
+            .collect();
+        let w = learn_weights(&prefs, 600, 0.5);
+        assert!(w.edge_node < 5.0, "unobserved edge_node blew up: {}", w.edge_node);
+        assert!(w.bends < 5.0, "unobserved bends blew up: {}", w.bends);
+        // The terms that did vary still rank sensibly (crossings over length).
+        assert!(w.crossings > w.length);
     }
 
     #[test]
