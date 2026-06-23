@@ -57,7 +57,7 @@ struct State {
 
 /// A `LayoutScore` with the given soft terms (for synthetic teaching examples).
 fn ls(crossings: usize, length: f32) -> mullion::refine::LayoutScore {
-    mullion::refine::LayoutScore { total: 0.0, crossings, length, area: 2000.0, alignment: 10, overlap: 0 }
+    mullion::refine::LayoutScore { total: 0.0, crossings, length, area: 2000.0, alignment: 10, bends: 0, edge_node: 0, overlap: 0 }
 }
 
 /// Two tastes *learned* from a handful of example corrections: one that prefers
@@ -164,8 +164,8 @@ fn render(buf: &mut Buffer, st: &mut State) {
     let s = score(&st.canvas, &st.edges, st.weights());
     buf.set_string(0, 0, "autolayout — a:layout  r:refine  n:anneal  w:taste  s:scatter  hjkl/arrows:pan  q:quit",
         Style::default().fg(Color::White).add_modifier(Modifier::BOLD));
-    let status = format!(" taste: {}   {} crossings  len {:.0}  score {:.0}",
-        st.tastes[st.active].0, s.crossings, s.length, s.total);
+    let status = format!(" taste: {}   {} crossings  {} bends  {} over-node  len {:.0}  score {:.0}",
+        st.tastes[st.active].0, s.crossings, s.bends, s.edge_node, s.length, s.total);
     let sstyle = Style::default().fg(Color::Black).bg(Color::Gray);
     for x in 0..area.width {
         buf.set_string(x, area.height - 1, " ", sstyle);

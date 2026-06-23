@@ -41,13 +41,27 @@ pub struct ScoreWeights {
     pub area: f32,
     /// Per distinct node column/row — fewer means better **alignment**.
     pub alignment: f32,
+    /// Per **bend**: an edge whose endpoints share neither a row nor a column needs
+    /// at least one routing turn, so straight (axis-aligned) edges are cheaper.
+    pub bends: f32,
+    /// Per **edge-over-node**: an edge segment passing across a node it does not
+    /// connect to (bad for readability).
+    pub edge_node: f32,
     /// Per overlapping node pair — a hard penalty (keep it large).
     pub overlap: f32,
 }
 
 impl Default for ScoreWeights {
     fn default() -> Self {
-        Self { crossings: 20.0, length: 0.05, area: 0.002, alignment: 0.4, overlap: 1000.0 }
+        Self {
+            crossings: 20.0,
+            length: 0.05,
+            area: 0.002,
+            alignment: 0.4,
+            bends: 2.0,
+            edge_node: 10.0,
+            overlap: 1000.0,
+        }
     }
 }
 
@@ -65,6 +79,10 @@ pub struct LayoutScore {
     pub area: f32,
     /// Distinct node columns + rows (a proxy for grid alignment).
     pub alignment: usize,
+    /// Edges that are neither horizontal nor vertical (each needs a routing bend).
+    pub bends: usize,
+    /// Edge segments passing across a node they do not connect to.
+    pub edge_node: usize,
     /// Number of overlapping node pairs (should be 0).
     pub overlap: usize,
 }
@@ -78,6 +96,8 @@ impl LayoutScore {
             + w.length * self.length
             + w.area * self.area
             + w.alignment * self.alignment as f32
+            + w.bends * self.bends as f32
+            + w.edge_node * self.edge_node as f32
             + w.overlap * self.overlap as f32
     }
 }
@@ -151,9 +171,51 @@ pub fn score(canvas: &GraphCanvas, edges: &[(TileId, TileId)], weights: ScoreWei
         }
     }
 
-    let mut s = LayoutScore { total: 0.0, crossings, length, area, alignment, overlap };
+    // Bends: an edge whose endpoints share neither a column nor a row would need a
+    // routing turn (a diagonal can't be drawn straight in orthogonal routing).
+    let bends = edges
+        .iter()
+        .filter_map(|(a, b)| Some((centre.get(a)?, centre.get(b)?)))
+        .filter(|(p, q)| (p.0 - q.0).abs() > 0.5 && (p.1 - q.1).abs() > 0.5)
+        .count();
+
+    // Edge-over-node: an edge's centre segment crossing a node it does not connect to.
+    let mut edge_node = 0;
+    for &(a, b) in edges {
+        let (Some(&pa), Some(&pb)) = (centre.get(&a), centre.get(&b)) else { continue };
+        for &(id, r) in &nodes {
+            if id != a && id != b && seg_rect(pa, pb, r) {
+                edge_node += 1;
+            }
+        }
+    }
+
+    let mut s = LayoutScore { total: 0.0, crossings, length, area, alignment, bends, edge_node, overlap };
     s.total = s.weighted(weights);
     s
+}
+
+/// Whether the segment `p1p2` intersects the axis-aligned `rect` (Liang–Barsky clip).
+fn seg_rect(p1: (f32, f32), p2: (f32, f32), rect: crate::geometry::Rect) -> bool {
+    let (x0, y0) = (rect.x as f32, rect.y as f32);
+    let (x1, y1) = (rect.right() as f32, rect.bottom() as f32);
+    let (dx, dy) = (p2.0 - p1.0, p2.1 - p1.1);
+    let (mut t0, mut t1) = (0.0f32, 1.0f32);
+    for (p, q) in [(-dx, p1.0 - x0), (dx, x1 - p1.0), (-dy, p1.1 - y0), (dy, y1 - p1.1)] {
+        if p == 0.0 {
+            if q < 0.0 {
+                return false; // parallel and outside this slab
+            }
+        } else {
+            let t = q / p;
+            if p < 0.0 {
+                t0 = t0.max(t);
+            } else {
+                t1 = t1.min(t);
+            }
+        }
+    }
+    t0 <= t1
 }
 
 /// Polish `canvas` by greedy **hill-climbing** on the [`score`]: repeatedly try
@@ -339,10 +401,21 @@ impl Preference {
     }
 }
 
-/// The four learnable (soft) terms of a score, as a vector. `overlap` is a hard
-/// constraint, not learned.
-fn terms(s: &LayoutScore) -> [f32; 4] {
-    [s.crossings as f32, s.length, s.area, s.alignment as f32]
+/// The number of learnable (soft) score terms. `overlap` is a hard constraint and
+/// is not learned.
+const SOFT: usize = 6;
+
+/// The soft terms of a score, as a vector (order: crossings, length, area,
+/// alignment, bends, edge-over-node).
+fn terms(s: &LayoutScore) -> [f32; SOFT] {
+    [
+        s.crossings as f32,
+        s.length,
+        s.area,
+        s.alignment as f32,
+        s.bends as f32,
+        s.edge_node as f32,
+    ]
 }
 
 /// Fit [`ScoreWeights`] from `prefs` so preferred layouts score lower — **logistic
@@ -352,7 +425,7 @@ fn terms(s: &LayoutScore) -> [f32; 4] {
 ///
 /// This is the "train by showing improvements" step: a handful of drag-corrections
 /// teach the engine *how much each aesthetic criterion matters to you*. The result
-/// keeps the default `overlap` penalty (a hard constraint) and learns the four soft
+/// keeps the default `overlap` penalty (a hard constraint) and learns the soft
 /// weights. `iters`/`learn_rate` control the fit (e.g. 400, 0.5). Returns the
 /// defaults if `prefs` is empty.
 pub fn learn_weights(prefs: &[Preference], iters: usize, learn_rate: f32) -> ScoreWeights {
@@ -361,11 +434,11 @@ pub fn learn_weights(prefs: &[Preference], iters: usize, learn_rate: f32) -> Sco
     }
     // Per-term scale (mean magnitude over all layouts) so the terms — which span
     // wildly different ranges — are comparable during the fit.
-    let mut scale = [0.0f32; 4];
+    let mut scale = [0.0f32; SOFT];
     for p in prefs {
         for s in [&p.worse, &p.better] {
             let f = terms(s);
-            for k in 0..4 {
+            for k in 0..SOFT {
                 scale[k] += f[k].abs();
             }
         }
@@ -375,30 +448,30 @@ pub fn learn_weights(prefs: &[Preference], iters: usize, learn_rate: f32) -> Sco
     }
 
     // Difference vectors d = (worse − better), scaled. We want w·d > 0 for each.
-    let diffs: Vec<[f32; 4]> = prefs
+    let diffs: Vec<[f32; SOFT]> = prefs
         .iter()
         .map(|p| {
             let (fw, fb) = (terms(&p.worse), terms(&p.better));
-            let mut d = [0.0f32; 4];
-            for k in 0..4 {
+            let mut d = [0.0f32; SOFT];
+            for k in 0..SOFT {
                 d[k] = (fw[k] - fb[k]) / scale[k];
             }
             d
         })
         .collect();
 
-    let mut w = [1.0f32; 4]; // start equal; non-negative throughout
+    let mut w = [1.0f32; SOFT]; // start equal; non-negative throughout
     let lambda = 1e-3; // L2 regularisation keeps it bounded
     for _ in 0..iters {
-        let mut grad = [0.0f32; 4];
+        let mut grad = [0.0f32; SOFT];
         for d in &diffs {
-            let z: f32 = (0..4).map(|k| w[k] * d[k]).sum();
+            let z: f32 = (0..SOFT).map(|k| w[k] * d[k]).sum();
             let sig = 1.0 / (1.0 + z.exp()); // sigmoid(−z) = P(misordered)
-            for k in 0..4 {
+            for k in 0..SOFT {
                 grad[k] -= d[k] * sig;
             }
         }
-        for k in 0..4 {
+        for k in 0..SOFT {
             grad[k] = grad[k] / diffs.len() as f32 + lambda * w[k];
             w[k] = (w[k] - learn_rate * grad[k]).max(0.0);
         }
@@ -410,6 +483,8 @@ pub fn learn_weights(prefs: &[Preference], iters: usize, learn_rate: f32) -> Sco
         length: w[1] / scale[1],
         area: w[2] / scale[2],
         alignment: w[3] / scale[3],
+        bends: w[4] / scale[4],
+        edge_node: w[5] / scale[5],
         overlap: ScoreWeights::default().overlap,
     }
 }
@@ -470,6 +545,25 @@ mod tests {
     }
 
     #[test]
+    fn bends_and_edge_node_terms() {
+        use crate::FloatRect;
+        let mut c = GraphCanvas::new(120, 30);
+        c.add(1, FloatRect::new(0, 0, 8, 4)); // centre (4, 2)
+        c.add(2, FloatRect::new(40, 0, 8, 4)); // (44, 2) — between 1 and 3, same row
+        c.add(3, FloatRect::new(88, 0, 8, 4)); // (92, 2)
+        c.add(4, FloatRect::new(40, 18, 8, 4)); // (44, 20) — a different row
+        let w = ScoreWeights::default();
+        // 1→3 is horizontal (0 bends) but its segment passes across node 2.
+        let s = score(&c, &[(1, 3)], w);
+        assert_eq!(s.bends, 0);
+        assert_eq!(s.edge_node, 1);
+        // 1→4 is diagonal (1 bend) and crosses no other node.
+        let s2 = score(&c, &[(1, 4)], w);
+        assert_eq!(s2.bends, 1);
+        assert_eq!(s2.edge_node, 0);
+    }
+
+    #[test]
     fn refine_uncrosses_the_x() {
         // Swapping nodes 3 and 4 turns the X into two parallel horizontal edges.
         let (mut c, e) = crossed();
@@ -516,7 +610,7 @@ mod tests {
 
     /// A bare score with the given soft terms (overlap 0, total unset).
     fn ls(crossings: usize, length: f32, area: f32, alignment: usize) -> LayoutScore {
-        LayoutScore { total: 0.0, crossings, length, area, alignment, overlap: 0 }
+        LayoutScore { total: 0.0, crossings, length, area, alignment, bends: 0, edge_node: 0, overlap: 0 }
     }
 
     #[test]

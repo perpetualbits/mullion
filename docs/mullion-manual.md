@@ -1190,9 +1190,13 @@ let (b, a) = refine(&mut canvas, &edges, w, /* max passes */ 30);
 ```
 
 `score` returns a `LayoutScore` with both the weighted `total` and the **raw terms**
-(crossings, length, area, alignment, overlap) — so a caller can see *why* one layout
-beats another. The terms reuse what the engine already measures (crossings cf.
-`sugiyama::crossings`; length is the connector budget). `refine` converges to a
+— crossings, length, area (compactness), alignment, **bends** (edges that aren't
+axis-aligned, so they need a routing turn), **edge-over-node** (an edge passing
+across an unrelated node), and a hard overlap penalty — so a caller can see *why* one
+layout beats another. The terms reuse what the engine already measures (crossings cf.
+`sugiyama::crossings`; length is the connector budget). They steer real readability:
+optimising the richer score reaches the same zero crossings *and* fewer bends and no
+edge-over-node, where crossings alone leaves a tangle. `refine` converges to a
 swap-stable local optimum and is idempotent there.
 
 `refine` is greedy (swap-only), so it can plateau — on a dense or overlapping start
@@ -1217,8 +1221,9 @@ let weights = learn_weights(&prefs, /* iters */ 400, /* learn rate */ 0.5);
 ```
 
 `learn_weights` fits the weights by **logistic preference learning** (gradient
-descent, non-negative weights) so preferred layouts score lower; it learns the four
-soft terms and keeps the hard `overlap` penalty. A handful of corrections is enough
+descent, non-negative weights) so preferred layouts score lower; it learns the soft
+terms (crossings, length, area, alignment, bends, edge-over-node) and keeps the hard
+`overlap` penalty. A handful of corrections is enough
 to recover a taste — two users taught with opposite labels on the same layouts learn
 opposite weights and make opposite crossings-vs-length tradeoffs. A learnable layout
 engine with no neural net, on this deterministic scaffolding. Demo: `cargo run
@@ -1724,8 +1729,9 @@ cellular-automata / wave colour sources. Not part of the 13-phase plan.
 quality `score`, a local-search `refine` over it, and `learn_weights` that fits the
 weights to a user's drag-corrections (preference learning) — a layout engine you
 train by showing it improvements, with no neural net. A greedy refiner and a
-simulated-`anneal`er (richer moves, escapes minima) optimise the score. Still ahead:
-more score terms (bends, symmetry).
+simulated-`anneal`er (richer moves, escapes minima) optimise the score, which now
+scores crossings, length, area, alignment, bends, and edge-over-node. Possible next:
+more terms (symmetry), and capturing drag-corrections in a demo to close the loop.
 
 See `docs/tiling-engine-roadmap.md` and `docs/mullion-design-note.md` for the full
 plans and open design questions. This manual tracks the public API as each phase
