@@ -66,6 +66,10 @@ path = "examples/viewport.rs"
 name = "zoom"
 path = "examples/zoom.rs"
 
+[[example]]
+name = "autolayout"
+path = "examples/autolayout.rs"
+
 [dependencies]
 bitflags = "2"
 crossterm = "0.28"

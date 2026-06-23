@@ -1095,6 +1095,40 @@ A focus may be a tiling child, a floating child, or a node inside a nested graph
 matching solver's `(id, rect)` output. Demo: `cargo run --example zoom` (zoom a
 tile and watch it cross collapsed → titled → ported → full internal graph).
 
+### 3.25 Layered auto-layout — `mullion::sugiyama`
+
+The **automatic** half of placement (design note §5.4): arrange a directed graph
+into layers along the dataflow direction and order within layers to cut crossings,
+writing the result back into a `GraphCanvas` — so manual drag (§3.21) and
+auto-layout share one position model. This is the dagre / Graphviz-`dot` /
+ELK-layered family, the right default for the port-directed graphs of Phases 6–8.
+
+```rust
+use mullion::sugiyama::{auto_layout, SugiyamaParams, LayerDir};
+
+let edges = [(1, 4), (4, 7), (2, 7), (9, 1) /* a cycle */];
+auto_layout(&mut canvas, &edges, &SugiyamaParams {
+    dir: LayerDir::LeftRight, layer_gap: 8, node_gap: 2, grid: 2,
+});
+// canvas nodes are now placed in grid-snapped layers; route the edges as usual.
+```
+
+The pipeline runs in four steps, each exposed for inspection:
+
+1. **Break cycles** — a DFS feedback-arc-set drops the edges that close cycles from
+   the layering DAG (they are still drawn).
+2. **`assign_layers`** — longest-path layering, so every forward edge runs from a
+   lower layer to a higher one.
+3. **`order_layers`** — up/down **barycenter** sweeps that keep the ordering with the
+   fewest **`crossings`** (the metric is adjacent-layer edge inversions).
+4. **Coordinates** — layer → main axis, order → cross axis, snapped to the grid; the
+   canvas is resized to fit.
+
+`auto_layout` is **idempotent** — it depends only on node ids, sizes, and `edges`,
+not on current positions — so re-running reproduces the same placement. At terminal
+scale it skips dummy nodes for long edges; the connector router (§3.22) draws the
+actual wires. Demo: `cargo run --example autolayout` (`a` lays out, `s` scatters).
+
 ---
 
 ## 4. API reference by module
@@ -1120,6 +1154,7 @@ tile and watch it cross collapsed → titled → ported → full internal graph)
 | `graph` | `GraphCanvas` (`new`, `with_grid`, `resize`, `add`, `remove`, `place`, `nodes`, `move_to`, `nudge`, `snap_to_grid`, `solve`), `Viewport` (`pan_by`, `set_pan`, `visible`, `project`, `is_visible`, `v_metrics`/`h_metrics`) |
 | `route` | `route` (grid A\* with bend penalty), `route_all` (nudged set), `RouteRequest`, `Connector` (`route`), `render` (colour-per-net) |
 | `zoom` | `Lod` (`for_area`/`for_rect`), `LodScale`, `Zoom` (`weight`, `set_progress`), `lerp_rect`, `FocusTarget` (`resolve`) |
+| `sugiyama` | `auto_layout`, `assign_layers`, `order_layers`, `crossings`, `SugiyamaParams`, `LayerDir` |
 | `text` | `wrap`, `wrap_into_slots`, `shape_line`, `render_wrapped`, `render_line`, `WrappedText` (`lines`, `visible`, `page`, `page_count`), `VisualLine`, `VisualCell`, `CursorMap` (`visual_to_logical`, `logical_to_visual`), `BaseDirection` |
 | `record` | `RecordSource` (`key_of`, `fetch_after`, `fetch_before`, `approx_position`, `exact_len`), `Window`, `VecRecordSource` (`new`, `estimated`) |
 | `vlist` | `VirtualList` (`visible`, `scroll_by`, `set_viewport`, `scroll_metrics`, `at_top`/`at_bottom`, `capacity`), `ScrollMetrics`, `render_scrollbar` (vertical or horizontal by rect shape) |
@@ -1149,7 +1184,8 @@ Common re-exports at the crate root: `Buffer`, `Cell`, `Node`, `Constraint`,
 `wrap_into_slots`, `flow`, `slots_in`, `render_flow`, `Slot`, `PlacedLine`,
 `Socket`, `Flow`, `FlowStyle`, `draw_socket`, `bookends`, `GraphCanvas`, `route`,
 `route_all`, `Connector`, `RouteRequest`, `render_connectors`, `Viewport`, `Lod`,
-`LodScale`, `Zoom`, `lerp_rect`, `FocusTarget`.
+`LodScale`, `Zoom`, `lerp_rect`, `FocusTarget`, `auto_layout`, `assign_layers`,
+`order_layers`, `crossings`, `SugiyamaParams`, `LayerDir`.
 Module-scoped:
 `Axis`, `region_of`, `carousel_visible_range`, `solve` (`layout`);
 `Dir`/`Direction` (`tree`).
@@ -1493,6 +1529,14 @@ ported → full internal graph). `Tab` focuses, `space`/`z` zoom in/out.
 cargo run --example zoom
 ```
 
+**`examples/autolayout.rs`** — the §3.25 Sugiyama auto-layout: a directed graph
+(with one cycle) that you scatter (`s`) and then lay out (`a`) into clean
+left-to-right layers, gliding into place; the result lives on a pannable canvas.
+
+```text
+cargo run --example autolayout
+```
+
 **`examples/spiral_stress.rs`** (in the `aerie` crate) — an animated stress test
 and visual demo.  Draws a stack of nested frames arranged like a Fibonacci /
 golden-rectangle spiral that continuously uncurls and re-curls the other way
@@ -1551,11 +1595,12 @@ text engine, and node graphs on top of the tiling core):
 | 9     | `mullion::route` — nudging (`route_all` edge-occupancy → separate tracks + gutter capacity), crossing bias, colour-per-net `render`; §3.22 manual |
 | 10    | `mullion::graph::Viewport` — 2D pan-and-cull over a larger canvas; `project`/`is_visible` culling; exact 2-axis scrollbars (`render_scrollbar` now orientation-aware); canvas-space routes stable under pan; §3.23 manual |
 | 11    | `mullion::zoom` — semantic level-of-detail zoom: `Zoom` grows a focus tile through the solver (`Fill` weight easing), `Lod`/`LodScale` discrete thresholds, `lerp_rect`, `FocusTarget`; §3.24 manual |
+| 12    | `mullion::sugiyama` — layered (Sugiyama) auto-layout: feedback-arc-set cycle break, longest-path layers, barycenter ordering, grid-snapped coordinates written back to the `GraphCanvas`; §3.25 manual |
 
-**Upcoming (capability layer):** Phase 12 — Sugiyama (layered) auto-layout: assign
-layers along the dataflow direction, order within layers by median/barycenter to cut
-crossings, break cycles first with a feedback-arc-set heuristic — the dagre / `dot` /
-ELK-layered family, the right default for port-directed graphs.
+**Upcoming (capability layer):** Phase 13 (deep tail, optional v2) — nesting + taps:
+a sub-tile that is itself a graph *and* a node in its parent (hierarchical layout
+with port constraints), and fan-out as a rectilinear Steiner tree. Deferred by
+design — not in v1.
 
 See `docs/tiling-engine-roadmap.md` and `docs/mullion-design-note.md` for the full
 plans and open design questions. This manual tracks the public API as each phase
