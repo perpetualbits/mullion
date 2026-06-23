@@ -68,6 +68,19 @@ pub struct LayoutScore {
     pub overlap: usize,
 }
 
+impl LayoutScore {
+    /// Re-weight the raw terms under `w` — the figure of merit for a given set of
+    /// weights, without recomputing from a canvas. Useful for ranking a stored
+    /// score under learned weights (see [`learn_weights`]).
+    pub fn weighted(&self, w: ScoreWeights) -> f32 {
+        w.crossings * self.crossings as f32
+            + w.length * self.length
+            + w.area * self.area
+            + w.alignment * self.alignment as f32
+            + w.overlap * self.overlap as f32
+    }
+}
+
 /// Score `canvas`'s layout under `weights` (lower is better). `edges` are directed
 /// `(from, to)` pairs; only the geometry of the node rectangles is used.
 pub fn score(canvas: &GraphCanvas, edges: &[(TileId, TileId)], weights: ScoreWeights) -> LayoutScore {
@@ -137,12 +150,9 @@ pub fn score(canvas: &GraphCanvas, edges: &[(TileId, TileId)], weights: ScoreWei
         }
     }
 
-    let total = weights.crossings * crossings as f32
-        + weights.length * length
-        + weights.area * area
-        + weights.alignment * alignment as f32
-        + weights.overlap * overlap as f32;
-    LayoutScore { total, crossings, length, area, alignment, overlap }
+    let mut s = LayoutScore { total: 0.0, crossings, length, area, alignment, overlap };
+    s.total = s.weighted(weights);
+    s
 }
 
 /// Polish `canvas` by greedy **hill-climbing** on the [`score`]: repeatedly try
@@ -181,6 +191,104 @@ pub fn refine(
         }
     }
     (before, current)
+}
+
+// ── Learning the weights from preferences ──────────────────────────────────────
+
+/// One **preference**: a human improved `worse` into `better`, so `better ≻ worse`.
+/// Each side is a layout's raw [`LayoutScore`] terms (the `total` is ignored — the
+/// weights are what we are fitting). A drag-correction yields one of these for free,
+/// since manual placement and auto-layout share a [`GraphCanvas`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Preference {
+    /// The layout the human moved *away* from.
+    pub worse: LayoutScore,
+    /// The layout the human moved *toward* (preferred).
+    pub better: LayoutScore,
+}
+
+impl Preference {
+    /// A preference from two layouts: `better` is preferred over `worse`. (Scored
+    /// with default weights, since only the weight-independent raw terms are used.)
+    pub fn from_layouts(worse: &GraphCanvas, better: &GraphCanvas, edges: &[(TileId, TileId)]) -> Self {
+        let w = ScoreWeights::default();
+        Self { worse: score(worse, edges, w), better: score(better, edges, w) }
+    }
+}
+
+/// The four learnable (soft) terms of a score, as a vector. `overlap` is a hard
+/// constraint, not learned.
+fn terms(s: &LayoutScore) -> [f32; 4] {
+    [s.crossings as f32, s.length, s.area, s.alignment as f32]
+}
+
+/// Fit [`ScoreWeights`] from `prefs` so preferred layouts score lower — **logistic
+/// preference learning**: project each preference to the difference of its layouts'
+/// terms and fit a (non-negative) weight vector by gradient descent so that
+/// `score(worse) > score(better)`.
+///
+/// This is the "train by showing improvements" step: a handful of drag-corrections
+/// teach the engine *how much each aesthetic criterion matters to you*. The result
+/// keeps the default `overlap` penalty (a hard constraint) and learns the four soft
+/// weights. `iters`/`learn_rate` control the fit (e.g. 400, 0.5). Returns the
+/// defaults if `prefs` is empty.
+pub fn learn_weights(prefs: &[Preference], iters: usize, learn_rate: f32) -> ScoreWeights {
+    if prefs.is_empty() {
+        return ScoreWeights::default();
+    }
+    // Per-term scale (mean magnitude over all layouts) so the terms — which span
+    // wildly different ranges — are comparable during the fit.
+    let mut scale = [0.0f32; 4];
+    for p in prefs {
+        for s in [&p.worse, &p.better] {
+            let f = terms(s);
+            for k in 0..4 {
+                scale[k] += f[k].abs();
+            }
+        }
+    }
+    for s in &mut scale {
+        *s = (*s / (prefs.len() as f32 * 2.0)).max(1e-6);
+    }
+
+    // Difference vectors d = (worse − better), scaled. We want w·d > 0 for each.
+    let diffs: Vec<[f32; 4]> = prefs
+        .iter()
+        .map(|p| {
+            let (fw, fb) = (terms(&p.worse), terms(&p.better));
+            let mut d = [0.0f32; 4];
+            for k in 0..4 {
+                d[k] = (fw[k] - fb[k]) / scale[k];
+            }
+            d
+        })
+        .collect();
+
+    let mut w = [1.0f32; 4]; // start equal; non-negative throughout
+    let lambda = 1e-3; // L2 regularisation keeps it bounded
+    for _ in 0..iters {
+        let mut grad = [0.0f32; 4];
+        for d in &diffs {
+            let z: f32 = (0..4).map(|k| w[k] * d[k]).sum();
+            let sig = 1.0 / (1.0 + z.exp()); // sigmoid(−z) = P(misordered)
+            for k in 0..4 {
+                grad[k] -= d[k] * sig;
+            }
+        }
+        for k in 0..4 {
+            grad[k] = grad[k] / diffs.len() as f32 + lambda * w[k];
+            w[k] = (w[k] - learn_rate * grad[k]).max(0.0);
+        }
+    }
+
+    // Convert scaled weights back to raw-term weights (raw = scaled / scale).
+    ScoreWeights {
+        crossings: w[0] / scale[0],
+        length: w[1] / scale[1],
+        area: w[2] / scale[2],
+        alignment: w[3] / scale[3],
+        overlap: ScoreWeights::default().overlap,
+    }
 }
 
 /// Swap the canvas positions of nodes `a` and `b` (a no-op if either is absent).
@@ -258,6 +366,63 @@ mod tests {
         let (before, after) = refine(&mut c, &e, w, 8); // second run: nothing to do
         assert_eq!(before, settled);
         assert_eq!(after, settled);
+    }
+
+    // ── Learning the weights ──────────────────────────────────────────────
+
+    /// A bare score with the given soft terms (overlap 0, total unset).
+    fn ls(crossings: usize, length: f32, area: f32, alignment: usize) -> LayoutScore {
+        LayoutScore { total: 0.0, crossings, length, area, alignment, overlap: 0 }
+    }
+
+    #[test]
+    fn empty_prefs_keep_defaults() {
+        assert_eq!(learn_weights(&[], 100, 0.5), ScoreWeights::default());
+    }
+
+    #[test]
+    fn learning_is_deterministic() {
+        let prefs = vec![Preference { worse: ls(3, 200.0, 2000.0, 12), better: ls(0, 180.0, 2000.0, 9) }];
+        assert_eq!(learn_weights(&prefs, 200, 0.5), learn_weights(&prefs, 200, 0.5));
+    }
+
+    #[test]
+    fn learns_crossings_outrank_length() {
+        // A human who always prefers FEWER crossings — even when it costs length.
+        let prefs: Vec<Preference> = (0..15)
+            .map(|i| Preference {
+                worse: ls(4, 150.0 + i as f32, 2000.0, 10), // crossy but short
+                better: ls(1, 250.0 + i as f32, 2000.0, 10), // clean but longer
+            })
+            .collect();
+        let w = learn_weights(&prefs, 600, 0.5);
+        // Learned weights rank every training pair the way the human did…
+        for p in &prefs {
+            assert!(p.better.weighted(w) < p.worse.weighted(w));
+        }
+        // …and decide a *fresh* crossings-vs-length tradeoff in favour of fewer.
+        let crossy_short = ls(3, 100.0, 2000.0, 10);
+        let clean_long = ls(0, 320.0, 2000.0, 10);
+        assert!(clean_long.weighted(w) < crossy_short.weighted(w));
+        // All learned weights are non-negative (every term is a cost).
+        for v in [w.crossings, w.length, w.area, w.alignment] {
+            assert!(v >= 0.0);
+        }
+    }
+
+    #[test]
+    fn learns_the_opposite_taste_too() {
+        // The mirror: a human who prefers SHORTER wires even at the cost of a crossing.
+        let prefs: Vec<Preference> = (0..15)
+            .map(|i| Preference {
+                worse: ls(1, 300.0 + i as f32, 2000.0, 10), // clean but long
+                better: ls(4, 150.0 + i as f32, 2000.0, 10), // crossy but short
+            })
+            .collect();
+        let w = learn_weights(&prefs, 600, 0.5);
+        let clean_long = ls(0, 320.0, 2000.0, 10);
+        let crossy_short = ls(3, 120.0, 2000.0, 10);
+        assert!(crossy_short.weighted(w) < clean_long.weighted(w), "this taste prefers short");
     }
 
     use proptest::prelude::*;

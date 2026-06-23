@@ -12,6 +12,8 @@
 //!
 //! Keys
 //!   a              auto-layout (Sugiyama)
+//!   r              refine (hill-climb the score under the active taste)
+//!   w              cycle the weight taste (default / two learned tastes)
 //!   s              scatter
 //!   ← ↓ ↑ → / hjkl  pan
 //!   q              quit
@@ -27,11 +29,11 @@ use mullion::{
     float::free_cells_in_window,
     label::Side,
     poll_event,
-    refine::{refine, score, ScoreWeights},
+    refine::{learn_weights, refine, score, Preference, ScoreWeights},
     route::{render as render_connectors, route_all, Connector, RouteRequest},
     socket::{draw_socket, Flow, Socket},
     style::{Color, Modifier, Style},
-    sugiyama::{auto_layout, crossings, order_layers, SugiyamaParams},
+    sugiyama::{auto_layout, SugiyamaParams},
     zoom::lerp_rect,
     Buffer, FloatRect, GraphCanvas, LineWeight, Rect, Terminal, TileId, Viewport,
 };
@@ -47,6 +49,30 @@ struct State {
     /// Where each node is gliding toward (auto-layout or scatter result).
     target: HashMap<TileId, FloatRect>,
     vp: Viewport,
+    /// Selectable weight tastes: `(name, weights)`; `r` refines with the active one.
+    tastes: Vec<(&'static str, ScoreWeights)>,
+    active: usize,
+}
+
+/// A `LayoutScore` with the given soft terms (for synthetic teaching examples).
+fn ls(crossings: usize, length: f32) -> mullion::refine::LayoutScore {
+    mullion::refine::LayoutScore { total: 0.0, crossings, length, area: 2000.0, alignment: 10, overlap: 0 }
+}
+
+/// Two tastes *learned* from a handful of example corrections: one that prefers
+/// fewer crossings (even at the cost of length), one that prefers shorter wires.
+fn learned_tastes() -> Vec<(&'static str, ScoreWeights)> {
+    let few_crossings: Vec<Preference> = (0..15)
+        .map(|i| Preference { worse: ls(4, 150.0 + i as f32), better: ls(1, 250.0 + i as f32) })
+        .collect();
+    let short_wires: Vec<Preference> = (0..15)
+        .map(|i| Preference { worse: ls(1, 300.0 + i as f32), better: ls(4, 150.0 + i as f32) })
+        .collect();
+    vec![
+        ("default", ScoreWeights::default()),
+        ("learned: few crossings", learn_weights(&few_crossings, 600, 0.5)),
+        ("learned: short wires", learn_weights(&short_wires, 600, 0.5)),
+    ]
 }
 
 /// Scatter positions — deliberately messy, so a layout has something to fix.
@@ -70,7 +96,11 @@ impl State {
             (1, 4), (4, 7), (2, 7), (7, 8), (8, 5), (3, 8),
             (5, 9), (3, 6), (6, 9), (9, 1),
         ];
-        Self { canvas, edges, target, vp: Viewport::new(window, 130, 44) }
+        Self { canvas, edges, target, vp: Viewport::new(window, 130, 44), tastes: learned_tastes(), active: 0 }
+    }
+
+    fn weights(&self) -> ScoreWeights {
+        self.tastes[self.active].1
     }
 
     fn rect_of(&self, id: TileId) -> Option<Rect> {
@@ -130,13 +160,11 @@ fn render(buf: &mut Buffer, st: &mut State) {
     }
 
     // ── Help & status ──────────────────────────────────────────────────────
-    let order = order_layers(&st.canvas.nodes().iter().map(|n| n.id).collect::<Vec<_>>(), &st.edges);
-    let s = score(&st.canvas, &st.edges, ScoreWeights::default());
-    buf.set_string(0, 0, "autolayout — a:layout  r:refine  s:scatter  hjkl/arrows:pan  q:quit",
+    let s = score(&st.canvas, &st.edges, st.weights());
+    buf.set_string(0, 0, "autolayout — a:layout  r:refine  w:taste  s:scatter  hjkl/arrows:pan  q:quit",
         Style::default().fg(Color::White).add_modifier(Modifier::BOLD));
-    let status = format!(" {} nodes  {} edges  {} layers  {} crossings  score {:.0}  len {:.0}",
-        st.canvas.nodes().len(), st.edges.len(), order.len(),
-        crossings(&order, &st.edges), s.total, s.length);
+    let status = format!(" taste: {}   {} crossings  len {:.0}  score {:.0}",
+        st.tastes[st.active].0, s.crossings, s.length, s.total);
     let sstyle = Style::default().fg(Color::Black).bg(Color::Gray);
     for x in 0..area.width {
         buf.set_string(x, area.height - 1, " ", sstyle);
@@ -188,6 +216,10 @@ fn run(term: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<()> {
                 KeyCode::Char('q') => break,
                 KeyCode::Char('a') => st.target = layout_targets(&st),
                 KeyCode::Char('r') => st.target = refine_targets(&st),
+                KeyCode::Char('w') => {
+                    st.active = (st.active + 1) % st.tastes.len();
+                    st.target = refine_targets(&st); // re-refine under the new taste
+                }
                 KeyCode::Char('s') => st.target = scatter(),
                 KeyCode::Left | KeyCode::Char('h') => st.vp.pan_by(-2, 0),
                 KeyCode::Right | KeyCode::Char('l') => st.vp.pan_by(2, 0),
@@ -213,7 +245,7 @@ fn layout_targets(st: &State) -> HashMap<TileId, FloatRect> {
 /// nodes glide into their improved spots (swaps that drop crossings + wire length).
 fn refine_targets(st: &State) -> HashMap<TileId, FloatRect> {
     let mut tmp = st.canvas.clone();
-    refine(&mut tmp, &st.edges, ScoreWeights::default(), 30);
+    refine(&mut tmp, &st.edges, st.weights(), 30);
     tmp.nodes().iter().map(|n| (n.id, n.place)).collect()
 }
 

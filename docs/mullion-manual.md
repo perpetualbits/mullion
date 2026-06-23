@@ -1195,12 +1195,27 @@ beats another. The terms reuse what the engine already measures (crossings cf.
 `sugiyama::crossings`; length is the connector budget). `refine` converges to a
 swap-stable local optimum and is idempotent there.
 
-The score is deliberately **explicit and tunable** so it can be *learned*: because
-manual placement (§3.21) and auto-layout (§3.25) share one `GraphCanvas`, a
-drag-improved layout B versus the machine's A is a free preference pair (`B ≻ A`)
-to fit the weights to a user's taste — a learnable layout engine with no neural net,
-on this deterministic scaffolding. Demo: `cargo run --example autolayout` (`a` lays
-out, then `r` refines — watch the crossings and length drop in the status line).
+The score is deliberately **explicit and tunable** so it can be *learned* — "train
+the engine by showing it improvements." Because manual placement (§3.21) and
+auto-layout (§3.25) share one `GraphCanvas`, a drag-improved layout B versus the
+machine's A is a free preference pair (`B ≻ A`):
+
+```rust
+use mullion::refine::{Preference, learn_weights};
+
+let prefs = vec![Preference::from_layouts(&machine, &hand_fixed, &edges) /* , … */];
+let weights = learn_weights(&prefs, /* iters */ 400, /* learn rate */ 0.5);
+// `refine` with these weights now optimises *your* taste, not a generic one.
+```
+
+`learn_weights` fits the weights by **logistic preference learning** (gradient
+descent, non-negative weights) so preferred layouts score lower; it learns the four
+soft terms and keeps the hard `overlap` penalty. A handful of corrections is enough
+to recover a taste — two users taught with opposite labels on the same layouts learn
+opposite weights and make opposite crossings-vs-length tradeoffs. A learnable layout
+engine with no neural net, on this deterministic scaffolding. Demo: `cargo run
+--example autolayout` (`a` lays out, `r` refines, `w` cycles the default and two
+*learned* tastes — watch the same graph settle differently).
 
 ---
 
@@ -1229,7 +1244,7 @@ out, then `r` refines — watch the crossings and length drop in the status line
 | `route` | `route` (grid A\* with bend penalty), `route_all` (nudged set), `RouteRequest`, `Connector` (`route`), `render` (colour-per-net) |
 | `zoom` | `Lod` (`for_area`/`for_rect`), `LodScale`, `Zoom` (`weight`, `set_progress`), `lerp_rect`, `FocusTarget` (`resolve`) |
 | `sugiyama` | `auto_layout`, `assign_layers`, `order_layers`, `crossings`, `SugiyamaParams`, `LayerDir` |
-| `refine` | `score`, `refine`, `LayoutScore`, `ScoreWeights` |
+| `refine` | `score`, `refine`, `LayoutScore` (`weighted`), `ScoreWeights`, `Preference`, `learn_weights` |
 | `text` | `wrap`, `wrap_into_slots`, `shape_line`, `render_wrapped`, `render_line`, `WrappedText` (`lines`, `visible`, `page`, `page_count`), `VisualLine`, `VisualCell`, `CursorMap` (`visual_to_logical`, `logical_to_visual`), `BaseDirection` |
 | `record` | `RecordSource` (`key_of`, `fetch_after`, `fetch_before`, `approx_position`, `exact_len`), `Window`, `VecRecordSource` (`new`, `estimated`) |
 | `vlist` | `VirtualList` (`visible`, `scroll_by`, `set_viewport`, `scroll_metrics`, `at_top`/`at_bottom`, `capacity`), `ScrollMetrics`, `render_scrollbar` (vertical or horizontal by rect shape) |
@@ -1261,7 +1276,8 @@ Common re-exports at the crate root: `Buffer`, `Cell`, `Node`, `Constraint`,
 `route_all`, `Connector`, `RouteRequest`, `render_connectors`, `Viewport`, `Lod`,
 `LodScale`, `Zoom`, `lerp_rect`, `FocusTarget`, `auto_layout`, `assign_layers`,
 `order_layers`, `crossings`, `SugiyamaParams`, `LayerDir`, `Field`, `BLOCK_RAMP`,
-`ASCII_RAMP`, `score`, `refine`, `LayoutScore`, `ScoreWeights`.
+`ASCII_RAMP`, `score`, `refine`, `LayoutScore`, `ScoreWeights`, `Preference`,
+`learn_weights`.
 Module-scoped:
 `Axis`, `region_of`, `carousel_visible_range`, `solve` (`layout`);
 `Dir`/`Direction` (`tree`).
@@ -1608,7 +1624,9 @@ cargo run --example zoom
 **`examples/autolayout.rs`** — the §3.25 Sugiyama auto-layout and §3.27 refinement:
 a directed graph (with one cycle) that you scatter (`s`), lay out (`a`) into clean
 left-to-right layers, then **refine** (`r`) to polish — nodes glide into place and
-the status line shows crossings, score, and wire length dropping. Pannable canvas.
+the status line shows crossings, score, and wire length dropping. `w` cycles the
+default weights and two *learned* tastes (few-crossings / short-wires), re-refining
+so you see learned taste change the layout. Pannable canvas.
 
 ```text
 cargo run --example autolayout
@@ -1693,10 +1711,11 @@ design — not in v1.
 and the substrate for corner-crossing gaps and content-carrying wires (strips), and
 cellular-automata / wave colour sources. Not part of the 13-phase plan.
 
-`mullion::refine` (§3.27) begins a **learnable-layout** direction: an explicit,
-weighted quality `score` plus a local-search `refine` over it — the deterministic
-scaffolding for fitting the weights to a user's drag-corrections later (a learnable
-layout engine with no neural net).
+`mullion::refine` (§3.27) is a **learnable-layout** direction: an explicit, weighted
+quality `score`, a local-search `refine` over it, and `learn_weights` that fits the
+weights to a user's drag-corrections (preference learning) — a layout engine you
+train by showing it improvements, with no neural net. Still ahead: a stronger
+optimiser (annealing, richer moves) and more score terms (bends, symmetry).
 
 See `docs/tiling-engine-roadmap.md` and `docs/mullion-design-note.md` for the full
 plans and open design questions. This manual tracks the public API as each phase
