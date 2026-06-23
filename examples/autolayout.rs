@@ -27,6 +27,7 @@ use mullion::{
     float::free_cells_in_window,
     label::Side,
     poll_event,
+    refine::{refine, score, ScoreWeights},
     route::{render as render_connectors, route_all, Connector, RouteRequest},
     socket::{draw_socket, Flow, Socket},
     style::{Color, Modifier, Style},
@@ -130,10 +131,12 @@ fn render(buf: &mut Buffer, st: &mut State) {
 
     // ── Help & status ──────────────────────────────────────────────────────
     let order = order_layers(&st.canvas.nodes().iter().map(|n| n.id).collect::<Vec<_>>(), &st.edges);
-    buf.set_string(0, 0, "autolayout — a:layout  s:scatter  hjkl/arrows:pan  q:quit",
+    let s = score(&st.canvas, &st.edges, ScoreWeights::default());
+    buf.set_string(0, 0, "autolayout — a:layout  r:refine  s:scatter  hjkl/arrows:pan  q:quit",
         Style::default().fg(Color::White).add_modifier(Modifier::BOLD));
-    let status = format!(" {} nodes  {} edges  {} layers  {} crossings",
-        st.canvas.nodes().len(), st.edges.len(), order.len(), crossings(&order, &st.edges));
+    let status = format!(" {} nodes  {} edges  {} layers  {} crossings  score {:.0}  len {:.0}",
+        st.canvas.nodes().len(), st.edges.len(), order.len(),
+        crossings(&order, &st.edges), s.total, s.length);
     let sstyle = Style::default().fg(Color::Black).bg(Color::Gray);
     for x in 0..area.width {
         buf.set_string(x, area.height - 1, " ", sstyle);
@@ -184,6 +187,7 @@ fn run(term: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<()> {
             Some(Event::Key(KeyEvent { code, .. })) => match code {
                 KeyCode::Char('q') => break,
                 KeyCode::Char('a') => st.target = layout_targets(&st),
+                KeyCode::Char('r') => st.target = refine_targets(&st),
                 KeyCode::Char('s') => st.target = scatter(),
                 KeyCode::Left | KeyCode::Char('h') => st.vp.pan_by(-2, 0),
                 KeyCode::Right | KeyCode::Char('l') => st.vp.pan_by(2, 0),
@@ -202,6 +206,14 @@ fn run(term: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<()> {
 fn layout_targets(st: &State) -> HashMap<TileId, FloatRect> {
     let mut tmp = st.canvas.clone();
     auto_layout(&mut tmp, &st.edges, &SugiyamaParams { layer_gap: 8, node_gap: 2, ..Default::default() });
+    tmp.nodes().iter().map(|n| (n.id, n.place)).collect()
+}
+
+/// Hill-climb the score on a clone and read back the refined positions, so the
+/// nodes glide into their improved spots (swaps that drop crossings + wire length).
+fn refine_targets(st: &State) -> HashMap<TileId, FloatRect> {
+    let mut tmp = st.canvas.clone();
+    refine(&mut tmp, &st.edges, ScoreWeights::default(), 30);
     tmp.nodes().iter().map(|n| (n.id, n.place)).collect()
 }
 
