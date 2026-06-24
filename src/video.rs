@@ -115,6 +115,18 @@ pub enum Dither {
     FloydSteinberg,
 }
 
+/// How a [`Frame`] is resampled to the cell grid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Sampling {
+    /// **Bilinear**: blend the four nearest source pixels — smoothest, the faithful
+    /// default. About twice the per-frame cost of nearest.
+    #[default]
+    Bilinear,
+    /// **Nearest**: take the single closest source pixel — much cheaper, with a minor
+    /// quality loss that the braille dither largely hides. Good for fast/small panels.
+    Nearest,
+}
+
 /// An optional post-sample picture effect, applied per sample after the source colour
 /// is read. With no filters the widget reproduces the source faithfully.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -151,10 +163,7 @@ impl Filter {
                 let d2 = ((dx * dx + dy * dy) / 0.5).min(1.0); // 0 at centre, 1 at corners
                 scale(c, 1.0 - s.clamp(0.0, 1.0) * d2)
             }
-            Filter::Phosphor { hue, sat } => match Color::from_hsv(hue, sat, luma(c) / 255.0) {
-                Color::Rgb(r, g, b) => (r, g, b),
-                _ => c,
-            },
+            Filter::Phosphor { hue, sat } => phosphor_rgb(hue, sat, luma(c) / 255.0),
             Filter::Gamma(g) => {
                 let m = |x: u8| clamp_u8(255.0 * (x as f32 / 255.0).powf(g));
                 (m(c.0), m(c.1), m(c.2))
@@ -178,12 +187,13 @@ impl Filter {
 pub struct Video {
     encoding: Encoding,
     dither: Dither,
+    sampling: Sampling,
     filters: Vec<Filter>,
 }
 
 impl Video {
     /// A faithful widget: [`Braille`](Encoding::Braille), [`Bayer`](Dither::Bayer)
-    /// dither, no filters.
+    /// dither, [`Bilinear`](Sampling::Bilinear) sampling, no filters.
     pub fn new() -> Self {
         Self::default()
     }
@@ -200,15 +210,41 @@ impl Video {
         self
     }
 
+    /// Choose the [`Frame`] [`Sampling`] (builder); only affects [`render_frame`]
+    /// (a `sample` closure does its own sampling).
+    ///
+    /// [`render_frame`]: Self::render_frame
+    pub fn sampling(mut self, sampling: Sampling) -> Self {
+        self.sampling = sampling;
+        self
+    }
+
     /// Append a [`Filter`] (builder); filters apply in the order added.
     pub fn filter(mut self, filter: Filter) -> Self {
         self.filters.push(filter);
         self
     }
 
-    /// Render a [`Frame`] into `area`, sampled bilinearly.
+    /// Render a [`Frame`] into `area`, resampled per the configured [`Sampling`]. This
+    /// is the fast path: the source-pixel taps are precomputed once per axis (the cell
+    /// grid is regular) rather than re-derived per sub-pixel.
     pub fn render_frame(&self, buf: &mut Buffer, area: Rect, frame: &Frame) {
-        self.render(buf, area, |u, v| frame.sample(u, v));
+        if area.width == 0 || area.height == 0 || frame.width == 0 || frame.height == 0 {
+            return;
+        }
+        let compiled = self.compile_filters();
+        match self.encoding {
+            Encoding::Braille => {
+                let (gw, gh) = (area.width as usize * 2, area.height as usize * 4);
+                let s = FrameSampler::new(frame, gw, gh, self.sampling);
+                self.render_braille(buf, area, gw, gh, &compiled, |gx, gy| s.at(gx, gy));
+            }
+            Encoding::HalfBlock => {
+                let (gw, gh) = (area.width as usize, area.height as usize * 2);
+                let s = FrameSampler::new(frame, gw, gh, self.sampling);
+                self.render_half_block(buf, area, gh, &compiled, |gx, gy| s.at(gx, gy));
+            }
+        }
     }
 
     /// Render into `area` from a `sample(u, v) -> Rgb` closure (`u, v ∈ [0, 1]`) — for
@@ -217,34 +253,66 @@ impl Video {
         if area.width == 0 || area.height == 0 {
             return;
         }
+        let compiled = self.compile_filters();
         match self.encoding {
-            Encoding::Braille => self.render_braille(buf, area, sample),
-            Encoding::HalfBlock => self.render_half_block(buf, area, sample),
+            Encoding::Braille => {
+                let (gw, gh) = (area.width as usize * 2, area.height as usize * 4);
+                let (sw, sh) = (gw as f32, gh as f32);
+                self.render_braille(buf, area, gw, gh, &compiled, |gx, gy| {
+                    sample((gx as f32 + 0.5) / sw, (gy as f32 + 0.5) / sh)
+                });
+            }
+            Encoding::HalfBlock => {
+                let (gw, gh) = (area.width as usize, area.height as usize * 2);
+                let (sw, sh) = (gw as f32, gh as f32);
+                self.render_half_block(buf, area, gh, &compiled, |gx, gy| {
+                    sample((gx as f32 + 0.5) / sw, (gy as f32 + 0.5) / sh)
+                });
+            }
         }
     }
 
-    /// Fold the filter pipeline over one sample.
-    fn shade(&self, line: usize, u: f32, v: f32, mut c: Rgb) -> Rgb {
-        for f in &self.filters {
-            c = f.apply(line, u, v, c);
-        }
-        c
+    /// Compile the filter list, baking each [`Filter::Phosphor`] into a 256-entry
+    /// luma→colour LUT (its `hue`/`sat` are fixed) so the per-sample work is a lookup,
+    /// not a `from_hsv`. The LUT is indexed by luma rounded to an integer, so it
+    /// quantises the tint's brightness to 256 steps — a ≤1-LSB approximation versus the
+    /// continuous per-sample `Filter::Phosphor`, imperceptible for a monochrome effect.
+    fn compile_filters(&self) -> Vec<CompiledFilter> {
+        self.filters
+            .iter()
+            .map(|f| match *f {
+                Filter::Phosphor { hue, sat } => {
+                    let mut lut = [(0u8, 0u8, 0u8); 256];
+                    for (i, slot) in lut.iter_mut().enumerate() {
+                        *slot = phosphor_rgb(hue, sat, i as f32 / 255.0);
+                    }
+                    CompiledFilter::Phosphor(Box::new(lut))
+                }
+                other => CompiledFilter::Simple(other),
+            })
+            .collect()
     }
-
-    fn render_braille(&self, buf: &mut Buffer, area: Rect, sample: impl Fn(f32, f32) -> Rgb) {
+    fn render_braille(
+        &self,
+        buf: &mut Buffer,
+        area: Rect,
+        gw: usize,
+        gh: usize,
+        filters: &[CompiledFilter],
+        grid: impl Fn(usize, usize) -> Rgb,
+    ) {
         const BIT: [[u8; 2]; 4] = [[0x01, 0x08], [0x02, 0x10], [0x04, 0x20], [0x40, 0x80]];
         let (aw, ah) = (area.width as usize, area.height as usize);
-        let (gw, gh) = (aw * 2, ah * 4); // sub-pixel grid
         let (sw, sh) = (gw as f32, gh as f32);
 
-        // One pass: shade every sub-pixel, store its luma for dithering, and
+        // One pass: sample + filter every sub-pixel, store its luma for dithering, and
         // accumulate each cell's average colour (8 sub-pixels per cell).
         let mut lum = vec![0.0f32; gw * gh];
         let mut cell_rgb = vec![(0u32, 0u32, 0u32); aw * ah];
         for gy in 0..gh {
             for gx in 0..gw {
                 let (u, v) = ((gx as f32 + 0.5) / sw, (gy as f32 + 0.5) / sh);
-                let c = self.shade(gy, u, v, sample(u, v));
+                let c = shade(filters, gy, u, v, grid(gx, gy));
                 lum[gy * gw + gx] = luma(c) / 255.0;
                 let cell = &mut cell_rgb[(gy / 4) * aw + (gx / 2)];
                 cell.0 += c.0 as u32;
@@ -313,23 +381,120 @@ impl Video {
         lit
     }
 
-    fn render_half_block(&self, buf: &mut Buffer, area: Rect, sample: impl Fn(f32, f32) -> Rgb) {
-        let (aw, ah) = (area.width as f32, area.height as f32);
-        for row in 0..area.height {
-            for col in 0..area.width {
-                let u = (col as f32 + 0.5) / aw;
-                let vt = (row as f32 * 2.0 + 0.5) / (ah * 2.0);
-                let vb = (row as f32 * 2.0 + 1.5) / (ah * 2.0);
-                let top = self.shade(row as usize * 2, u, vt, sample(u, vt));
-                let bot = self.shade(row as usize * 2 + 1, u, vb, sample(u, vb));
+    fn render_half_block(
+        &self,
+        buf: &mut Buffer,
+        area: Rect,
+        gh: usize,
+        filters: &[CompiledFilter],
+        grid: impl Fn(usize, usize) -> Rgb,
+    ) {
+        let (aw, ah) = (area.width as usize, area.height as usize);
+        let (sw, sh) = (aw as f32, gh as f32);
+        for row in 0..ah {
+            for col in 0..aw {
+                let u = (col as f32 + 0.5) / sw;
+                let (gyt, gyb) = (row * 2, row * 2 + 1);
+                let vt = (gyt as f32 + 0.5) / sh;
+                let vb = (gyb as f32 + 0.5) / sh;
+                let top = shade(filters, gyt, u, vt, grid(col, gyt));
+                let bot = shade(filters, gyb, u, vb, grid(col, gyb));
                 let style = Style::default().fg(Color::Rgb(top.0, top.1, top.2)).bg(Color::Rgb(bot.0, bot.1, bot.2));
-                buf.set_char(area.x + col, area.y + row, '▀', style);
+                buf.set_char(area.x + col as u16, area.y + row as u16, '▀', style);
             }
         }
     }
 }
 
+// ── Filter compilation & sampling ──────────────────────────────────────────────────
+
+/// A [`Filter`] prepared for the per-sample loop: most are applied as-is, but
+/// [`Filter::Phosphor`] is baked into a luma→colour lookup table.
+enum CompiledFilter {
+    Simple(Filter),
+    Phosphor(Box<[Rgb; 256]>),
+}
+
+impl CompiledFilter {
+    fn apply(&self, line: usize, u: f32, v: f32, c: Rgb) -> Rgb {
+        match self {
+            CompiledFilter::Simple(f) => f.apply(line, u, v, c),
+            CompiledFilter::Phosphor(lut) => lut[(luma(c) as usize).min(255)],
+        }
+    }
+}
+
+/// Apply the compiled filter pipeline to one sample, in order.
+fn shade(filters: &[CompiledFilter], line: usize, u: f32, v: f32, mut c: Rgb) -> Rgb {
+    for f in filters {
+        c = f.apply(line, u, v, c);
+    }
+    c
+}
+
+/// One axis of a [`FrameSampler`]: the source-pixel tap(s) for an output coordinate.
+/// For nearest, `lo == hi` and `frac == 0`.
+struct AxisTap {
+    lo: usize,
+    hi: usize,
+    frac: f32,
+}
+
+/// Resamples a [`Frame`] to the `gw × gh` cell grid with the taps precomputed **once
+/// per axis** — the grid is regular, so the per-sub-pixel work is just the table reads,
+/// not the `clamp`/`floor`/`mul` that a fresh `(u, v)` lookup would redo every time.
+struct FrameSampler<'a> {
+    frame: &'a Frame,
+    xs: Vec<AxisTap>,
+    ys: Vec<AxisTap>,
+    bilinear: bool,
+}
+
+impl<'a> FrameSampler<'a> {
+    fn new(frame: &'a Frame, gw: usize, gh: usize, sampling: Sampling) -> Self {
+        let bilinear = matches!(sampling, Sampling::Bilinear);
+        // The taps for output index `i` of `n_out` over a source axis of `n_in` pixels.
+        let axis = |n_out: usize, n_in: usize| -> Vec<AxisTap> {
+            (0..n_out)
+                .map(|i| {
+                    let centre = (i as f32 + 0.5) / n_out as f32 * n_in as f32;
+                    if bilinear {
+                        let f = (centre - 0.5).max(0.0);
+                        let lo = (f.floor() as usize).min(n_in - 1);
+                        let hi = (lo + 1).min(n_in - 1);
+                        AxisTap { lo, hi, frac: f - lo as f32 }
+                    } else {
+                        let n = (centre as usize).min(n_in - 1);
+                        AxisTap { lo: n, hi: n, frac: 0.0 }
+                    }
+                })
+                .collect()
+        };
+        Self { frame, xs: axis(gw, frame.width), ys: axis(gh, frame.height), bilinear }
+    }
+
+    fn at(&self, gx: usize, gy: usize) -> Rgb {
+        let (ax, ay) = (&self.xs[gx], &self.ys[gy]);
+        let w = self.frame.width;
+        let px = |x: usize, y: usize| self.frame.pixels[y * w + x];
+        if !self.bilinear {
+            return px(ax.lo, ay.lo);
+        }
+        let top = lerp_rgb(px(ax.lo, ay.lo), px(ax.hi, ay.lo), ax.frac);
+        let bot = lerp_rgb(px(ax.lo, ay.hi), px(ax.hi, ay.hi), ax.frac);
+        lerp_rgb(top, bot, ay.frac)
+    }
+}
+
 // ── Colour helpers ────────────────────────────────────────────────────────────────
+
+/// The phosphor tint for luminance `value ∈ [0, 1]` at fixed `hue`/`sat`.
+fn phosphor_rgb(hue: f32, sat: f32, value: f32) -> Rgb {
+    match Color::from_hsv(hue, sat, value) {
+        Color::Rgb(r, g, b) => (r, g, b),
+        _ => (0, 0, 0),
+    }
+}
 
 /// Rec. 601 luma of an RGB sample (`0..=255`).
 fn luma(c: Rgb) -> f32 {
@@ -343,7 +508,8 @@ fn scale(c: Rgb, f: f32) -> Rgb {
 
 /// Linear interpolation between two RGB samples, `t ∈ [0, 1]`.
 fn lerp_rgb(a: Rgb, b: Rgb, t: f32) -> Rgb {
-    let m = |x: u8, y: u8| clamp_u8(x as f32 + (y as f32 - x as f32) * t);
+    // Interpolating two in-range bytes with t ∈ [0,1] never leaves [0,255], so no clamp.
+    let m = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t) as u8;
     (m(a.0, b.0), m(a.1, b.1), m(a.2, b.2))
 }
 
@@ -436,5 +602,40 @@ mod tests {
         let cell = buf.get(0, 0);
         let bright = |c: Color| if let Color::Rgb(r, _, _) = c { r } else { 0 };
         assert!(bright(cell.style.fg) > bright(cell.style.bg), "scanline should dim the lower line");
+    }
+
+    #[test]
+    fn nearest_sampling_picks_one_pixel_without_blending() {
+        // 2×1 frame (left red, right blue) into a 4-wide half-block area: nearest must
+        // pick exactly one source pixel per cell — never a blended colour.
+        let frame = Frame::from_rgb(2, 1, vec![(255, 0, 0), (0, 0, 255)]);
+        let area = Rect::new(0, 0, 4, 1);
+        let mut buf = Buffer::empty(area);
+        Video::new()
+            .encoding(Encoding::HalfBlock)
+            .sampling(Sampling::Nearest)
+            .render_frame(&mut buf, area, &frame);
+        for x in 0..4 {
+            let fg = buf.get(x, 0).style.fg;
+            assert!(
+                fg == Color::Rgb(255, 0, 0) || fg == Color::Rgb(0, 0, 255),
+                "nearest must not blend, got {fg:?} at {x}"
+            );
+        }
+        assert_eq!(buf.get(0, 0).style.fg, Color::Rgb(255, 0, 0));
+        assert_eq!(buf.get(3, 0).style.fg, Color::Rgb(0, 0, 255));
+    }
+
+    #[test]
+    fn phosphor_lut_matches_direct_filter_on_integer_luma() {
+        // For grey inputs luma is an exact integer, so the LUT (indexed by integer
+        // luma) equals the continuous per-sample filter exactly. For colour inputs the
+        // LUT quantises luma to 256 steps — a ≤1-LSB approximation, by design.
+        let filter = Filter::Phosphor { hue: 120.0, sat: 0.5 };
+        let compiled = Video::new().filter(filter).compile_filters();
+        for g in [0u8, 64, 128, 200, 255] {
+            let c = (g, g, g);
+            assert_eq!(compiled[0].apply(0, 0.0, 0.0, c), filter.apply(0, 0.0, 0.0, c));
+        }
     }
 }

@@ -14,6 +14,7 @@
 //! Keys
 //!   e              encoding: braille ↔ half-block
 //!   d              dither: Bayer (ordered) ↔ Floyd–Steinberg (error diffusion)
+//!   n              sampling: bilinear ↔ nearest
 //!   1..6           toggle scanlines / vignette / phosphor / gamma / saturation / grey
 //!   space          pause / resume
 //!   q              quit
@@ -29,7 +30,7 @@ use mullion::{
     backend::CrosstermBackend,
     poll_event,
     style::{Color, Modifier, Style},
-    video::{Dither, Encoding, Filter, Frame, Rgb, Video},
+    video::{Dither, Encoding, Filter, Frame, Rgb, Sampling, Video},
     Buffer, Rect, Terminal,
 };
 
@@ -52,6 +53,7 @@ struct State {
     t: f32,
     encoding: Encoding,
     dither: Dither,
+    sampling: Sampling,
     filters: [bool; 6],
     paused: bool,
 }
@@ -186,7 +188,7 @@ fn render(buf: &mut Buffer, st: &State, frame: &Frame, source: &str) {
     if area.height < 4 {
         return;
     }
-    let mut video = Video::new().encoding(st.encoding).dither(st.dither);
+    let mut video = Video::new().encoding(st.encoding).dither(st.dither).sampling(st.sampling);
     for (i, &on) in st.filters.iter().enumerate() {
         if on {
             video = video.filter(FILTERS[i]);
@@ -194,13 +196,14 @@ fn render(buf: &mut Buffer, st: &State, frame: &Frame, source: &str) {
     }
     video.render_frame(buf, frame_area(area), frame);
 
-    buf.set_string(0, 0, "tv — e:encoding  d:dither  1-6:filters  space:pause  q:quit",
+    buf.set_string(0, 0, "tv — e:encoding  d:dither  n:sampling  1-6:filters  space:pause  q:quit",
         Style::default().fg(Color::White).add_modifier(Modifier::BOLD));
     let active: Vec<&str> = (0..6).filter(|&i| st.filters[i]).map(|i| FILTER_NAMES[i]).collect();
-    let status = format!(" source: {}   encoding: {}   dither: {}   filters: {}",
+    let status = format!(" source: {}   encoding: {}   dither: {}   sampling: {}   filters: {}",
         source,
         match st.encoding { Encoding::Braille => "braille", Encoding::HalfBlock => "half-block" },
         match st.dither { Dither::Bayer => "bayer", Dither::FloydSteinberg => "floyd-steinberg" },
+        match st.sampling { Sampling::Bilinear => "bilinear", Sampling::Nearest => "nearest" },
         if active.is_empty() { "none (faithful)".to_string() } else { active.join(", ") });
     let sstyle = Style::default().fg(Color::Black).bg(Color::Gray);
     for x in 0..area.width {
@@ -230,7 +233,7 @@ fn main() -> io::Result<()> {
 }
 
 fn run(term: &mut Terminal<CrosstermBackend<io::Stdout>>, mut source: Source) -> io::Result<()> {
-    let mut st = State { t: 0.0, encoding: Encoding::Braille, dither: Dither::Bayer, filters: [false; 6], paused: false };
+    let mut st = State { t: 0.0, encoding: Encoding::Braille, dither: Dither::Bayer, sampling: Sampling::Bilinear, filters: [false; 6], paused: false };
     loop {
         let frame = source.frame(st.t);
         let label = source.label();
@@ -248,6 +251,12 @@ fn run(term: &mut Terminal<CrosstermBackend<io::Stdout>>, mut source: Source) ->
                     st.dither = match st.dither {
                         Dither::Bayer => Dither::FloydSteinberg,
                         Dither::FloydSteinberg => Dither::Bayer,
+                    };
+                }
+                KeyCode::Char('n') => {
+                    st.sampling = match st.sampling {
+                        Sampling::Bilinear => Sampling::Nearest,
+                        Sampling::Nearest => Sampling::Bilinear,
                     };
                 }
                 KeyCode::Char(' ') => st.paused = !st.paused,
