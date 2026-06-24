@@ -1843,8 +1843,9 @@ cargo run --example colorfield
 **`examples/tv.rs`** — the §3.28 `Video` widget: a synthesised colour-bar signal (or
 **real footage** via `cargo run --example tv -- clip.mp4`, decoded by `ffmpeg`),
 reproduced faithfully in truecolour, with `e` to switch braille/half-block encoding,
-`d` to switch Bayer/Floyd–Steinberg dither, and `1`–`6` to toggle the CRT/grading
-filters.
+`d` to switch Bayer/Floyd–Steinberg dither, `n` to switch bilinear/nearest sampling,
+`c` to drop colour depth (truecolor → 256 → 16 — fewer output bytes on a huge,
+I/O-bound screen), and `1`–`6` to toggle the CRT/grading filters.
 
 ```text
 cargo run --example tv
