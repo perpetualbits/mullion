@@ -73,6 +73,7 @@ pub mod terminal;
 pub mod text;
 pub mod theme;
 pub mod tree;
+pub mod video;
 pub mod vlist;
 pub mod zoom;
 
@@ -109,6 +110,7 @@ pub use text::{
 };
 pub use style::{Color, ColorDepth, Modifier, Style};
 pub use theme::Theme;
+pub use video::{Encoding, Filter, Frame, Rgb, Video};
 pub use terminal::{poll_event, read_event, Terminal};
 pub use render::render_carousel;
 pub use tree::{
