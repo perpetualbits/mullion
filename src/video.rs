@@ -101,6 +101,20 @@ pub enum Encoding {
     HalfBlock,
 }
 
+/// How [`Encoding::Braille`] decides which sub-pixels light — the dither.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Dither {
+    /// **Ordered** (4×4 Bayer): each sub-pixel thresholds against a fixed matrix.
+    /// Cheap and **temporally stable** (no frame-to-frame shimmer), but leaves a
+    /// regular cross-hatch in flat areas.
+    #[default]
+    Bayer,
+    /// **Floyd–Steinberg error diffusion**: the quantisation error of each sub-pixel
+    /// is scattered into its neighbours, dissolving the grid into an organic stipple.
+    /// Higher fidelity on stills; can shimmer slightly in motion.
+    FloydSteinberg,
+}
+
 /// An optional post-sample picture effect, applied per sample after the source colour
 /// is read. With no filters the widget reproduces the source faithfully.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -163,11 +177,13 @@ impl Filter {
 #[derive(Debug, Clone, Default)]
 pub struct Video {
     encoding: Encoding,
+    dither: Dither,
     filters: Vec<Filter>,
 }
 
 impl Video {
-    /// A faithful widget: [`Braille`](Encoding::Braille), no filters.
+    /// A faithful widget: [`Braille`](Encoding::Braille), [`Bayer`](Dither::Bayer)
+    /// dither, no filters.
     pub fn new() -> Self {
         Self::default()
     }
@@ -175,6 +191,12 @@ impl Video {
     /// Choose the cell [`Encoding`] (builder).
     pub fn encoding(mut self, encoding: Encoding) -> Self {
         self.encoding = encoding;
+        self
+    }
+
+    /// Choose the braille [`Dither`] (builder); ignored by [`Encoding::HalfBlock`].
+    pub fn dither(mut self, dither: Dither) -> Self {
+        self.dither = dither;
         self
     }
 
@@ -210,32 +232,85 @@ impl Video {
     }
 
     fn render_braille(&self, buf: &mut Buffer, area: Rect, sample: impl Fn(f32, f32) -> Rgb) {
-        // 4×4 Bayer dither and the braille sub-pixel bit per (sx, sy).
-        const BAYER: [[u8; 4]; 4] = [[0, 8, 2, 10], [12, 4, 14, 6], [3, 11, 1, 9], [15, 7, 13, 5]];
         const BIT: [[u8; 2]; 4] = [[0x01, 0x08], [0x02, 0x10], [0x04, 0x20], [0x40, 0x80]];
-        let (sw, sh) = (area.width as f32 * 2.0, area.height as f32 * 4.0);
-        for row in 0..area.height {
-            for col in 0..area.width {
-                let (mut mask, mut rs, mut gs, mut bs) = (0u8, 0u32, 0u32, 0u32);
-                for sy in 0..4u16 {
-                    for sx in 0..2u16 {
-                        let (gx, gy) = (col * 2 + sx, row * 4 + sy);
-                        let (u, v) = ((gx as f32 + 0.5) / sw, (gy as f32 + 0.5) / sh);
-                        let c = self.shade(gy as usize, u, v, sample(u, v));
-                        rs += c.0 as u32;
-                        gs += c.1 as u32;
-                        bs += c.2 as u32;
-                        let thr = (BAYER[(gy % 4) as usize][(gx % 4) as usize] as f32 + 0.5) / 16.0;
-                        if luma(c) / 255.0 > thr {
-                            mask |= BIT[sy as usize][sx as usize];
+        let (aw, ah) = (area.width as usize, area.height as usize);
+        let (gw, gh) = (aw * 2, ah * 4); // sub-pixel grid
+        let (sw, sh) = (gw as f32, gh as f32);
+
+        // One pass: shade every sub-pixel, store its luma for dithering, and
+        // accumulate each cell's average colour (8 sub-pixels per cell).
+        let mut lum = vec![0.0f32; gw * gh];
+        let mut cell_rgb = vec![(0u32, 0u32, 0u32); aw * ah];
+        for gy in 0..gh {
+            for gx in 0..gw {
+                let (u, v) = ((gx as f32 + 0.5) / sw, (gy as f32 + 0.5) / sh);
+                let c = self.shade(gy, u, v, sample(u, v));
+                lum[gy * gw + gx] = luma(c) / 255.0;
+                let cell = &mut cell_rgb[(gy / 4) * aw + (gx / 2)];
+                cell.0 += c.0 as u32;
+                cell.1 += c.1 as u32;
+                cell.2 += c.2 as u32;
+            }
+        }
+
+        let lit = self.dither_bits(lum, gw, gh);
+
+        for row in 0..ah {
+            for col in 0..aw {
+                let mut mask = 0u8;
+                for sy in 0..4 {
+                    for sx in 0..2 {
+                        if lit[(row * 4 + sy) * gw + (col * 2 + sx)] {
+                            mask |= BIT[sy][sx];
                         }
                     }
                 }
                 let g = char::from_u32(0x2800 + mask as u32).unwrap_or(' ');
-                let fg = Color::Rgb((rs / 8) as u8, (gs / 8) as u8, (bs / 8) as u8);
-                buf.set_grapheme(area.x + col, area.y + row, &g.to_string(), Style::default().fg(fg));
+                let (r, gn, b) = cell_rgb[row * aw + col];
+                let fg = Color::Rgb((r / 8) as u8, (gn / 8) as u8, (b / 8) as u8);
+                buf.set_grapheme(area.x + col as u16, area.y + row as u16, &g.to_string(), Style::default().fg(fg));
             }
         }
+    }
+
+    /// Quantise the luma grid (`gw × gh`, row-major) to lit/unlit sub-pixels under the
+    /// configured [`Dither`]. Floyd–Steinberg mutates `lum` as it diffuses error.
+    fn dither_bits(&self, mut lum: Vec<f32>, gw: usize, gh: usize) -> Vec<bool> {
+        const BAYER: [[u8; 4]; 4] = [[0, 8, 2, 10], [12, 4, 14, 6], [3, 11, 1, 9], [15, 7, 13, 5]];
+        let mut lit = vec![false; gw * gh];
+        match self.dither {
+            Dither::Bayer => {
+                for gy in 0..gh {
+                    for gx in 0..gw {
+                        let thr = (BAYER[gy % 4][gx % 4] as f32 + 0.5) / 16.0;
+                        lit[gy * gw + gx] = lum[gy * gw + gx] > thr;
+                    }
+                }
+            }
+            Dither::FloydSteinberg => {
+                for gy in 0..gh {
+                    for gx in 0..gw {
+                        let i = gy * gw + gx;
+                        let on = lum[i] > 0.5;
+                        lit[i] = on;
+                        let err = lum[i] - if on { 1.0 } else { 0.0 };
+                        if gx + 1 < gw {
+                            lum[i + 1] += err * 7.0 / 16.0;
+                        }
+                        if gy + 1 < gh {
+                            if gx > 0 {
+                                lum[i + gw - 1] += err * 3.0 / 16.0;
+                            }
+                            lum[i + gw] += err * 5.0 / 16.0;
+                            if gx + 1 < gw {
+                                lum[i + gw + 1] += err * 1.0 / 16.0;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        lit
     }
 
     fn render_half_block(&self, buf: &mut Buffer, area: Rect, sample: impl Fn(f32, f32) -> Rgb) {
@@ -327,6 +402,24 @@ mod tests {
         } else {
             panic!("expected Rgb");
         }
+    }
+
+    #[test]
+    fn floyd_steinberg_dithers_mid_grey_to_about_half() {
+        // A flat 50%-grey frame: error diffusion should light roughly half the dots
+        // (and neither all nor none), where ordered dither would tile a fixed pattern.
+        let frame = Frame::from_luma(1, 1, &[128]);
+        let area = Rect::new(0, 0, 8, 8);
+        let mut buf = Buffer::empty(area);
+        Video::new().dither(Dither::FloydSteinberg).render_frame(&mut buf, area, &frame);
+        let mut lit = 0u32;
+        for y in 0..8 {
+            for x in 0..8 {
+                lit += (buf.get(x, y).symbol.chars().next().unwrap() as u32 - 0x2800).count_ones();
+            }
+        }
+        let total = 8 * 8 * 8; // cells × 8 dots
+        assert!((total / 4..=3 * total / 4).contains(&lit), "FS lit {lit}/{total} should be ~half");
     }
 
     #[test]
