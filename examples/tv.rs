@@ -15,6 +15,7 @@
 //!   e              encoding: braille ↔ half-block
 //!   d              dither: Bayer (ordered) ↔ Floyd–Steinberg (error diffusion)
 //!   n              sampling: bilinear ↔ nearest
+//!   c              colour depth: truecolor → 256 → 16 (fewer output bytes, lower fidelity)
 //!   1..6           toggle scanlines / vignette / phosphor / gamma / saturation / grey
 //!   space          pause / resume
 //!   q              quit
@@ -28,7 +29,7 @@ use crossterm::event::{Event, KeyCode, KeyEvent};
 
 use mullion::{
     backend::CrosstermBackend,
-    style::{Color, Modifier, Style},
+    style::{Color, ColorDepth, Modifier, Style},
     video::{Dither, Encoding, Filter, Frame, Rgb, Sampling, Video},
     EventReader,
     Buffer, Rect, Terminal,
@@ -54,6 +55,7 @@ struct State {
     encoding: Encoding,
     dither: Dither,
     sampling: Sampling,
+    depth: ColorDepth,
     filters: [bool; 6],
     paused: bool,
 }
@@ -196,14 +198,15 @@ fn render(buf: &mut Buffer, st: &State, frame: &Frame, source: &str) {
     }
     video.render_frame(buf, frame_area(area), frame);
 
-    buf.set_string(0, 0, "tv — e:encoding  d:dither  n:sampling  1-6:filters  space:pause  q:quit",
+    buf.set_string(0, 0, "tv — e:encoding  d:dither  n:sampling  c:colour  1-6:filters  space:pause  q:quit",
         Style::default().fg(Color::White).add_modifier(Modifier::BOLD));
     let active: Vec<&str> = (0..6).filter(|&i| st.filters[i]).map(|i| FILTER_NAMES[i]).collect();
-    let status = format!(" source: {}   encoding: {}   dither: {}   sampling: {}   filters: {}",
+    let status = format!(" source: {}   encoding: {}   dither: {}   sampling: {}   colour: {}   filters: {}",
         source,
         match st.encoding { Encoding::Braille => "braille", Encoding::HalfBlock => "half-block" },
         match st.dither { Dither::Bayer => "bayer", Dither::FloydSteinberg => "floyd-steinberg" },
         match st.sampling { Sampling::Bilinear => "bilinear", Sampling::Nearest => "nearest" },
+        match st.depth { ColorDepth::TrueColor => "truecolor", ColorDepth::Palette256 => "256", ColorDepth::Palette16 => "16" },
         if active.is_empty() { "none (faithful)".to_string() } else { active.join(", ") });
     let sstyle = Style::default().fg(Color::Black).bg(Color::Gray);
     for x in 0..area.width {
@@ -238,7 +241,7 @@ fn run(term: &mut Terminal<CrosstermBackend<io::Stdout>>, mut source: Source) ->
     // on their own).
     let input = EventReader::new();
     let budget = Duration::from_millis(60);
-    let mut st = State { t: 0.0, encoding: Encoding::Braille, dither: Dither::Bayer, sampling: Sampling::Bilinear, filters: [false; 6], paused: false };
+    let mut st = State { t: 0.0, encoding: Encoding::Braille, dither: Dither::Bayer, sampling: Sampling::Bilinear, depth: ColorDepth::TrueColor, filters: [false; 6], paused: false };
     'frames: loop {
         let start = Instant::now();
         for ev in input.drain() {
@@ -262,6 +265,16 @@ fn run(term: &mut Terminal<CrosstermBackend<io::Stdout>>, mut source: Source) ->
                             Sampling::Bilinear => Sampling::Nearest,
                             Sampling::Nearest => Sampling::Bilinear,
                         };
+                    }
+                    KeyCode::Char('c') => {
+                        // Fewer SGR bytes per cell at lower depth — the lever for a
+                        // huge, terminal-I/O-bound screen (at a cost in colour fidelity).
+                        st.depth = match st.depth {
+                            ColorDepth::TrueColor => ColorDepth::Palette256,
+                            ColorDepth::Palette256 => ColorDepth::Palette16,
+                            ColorDepth::Palette16 => ColorDepth::TrueColor,
+                        };
+                        term.backend_mut().set_color_depth(st.depth);
                     }
                     KeyCode::Char(' ') => st.paused = !st.paused,
                     KeyCode::Char(c @ '1'..='6') => st.filters[c as usize - '1' as usize] ^= true,
