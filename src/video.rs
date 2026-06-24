@@ -268,7 +268,7 @@ impl Video {
                 let g = char::from_u32(0x2800 + mask as u32).unwrap_or(' ');
                 let (r, gn, b) = cell_rgb[row * aw + col];
                 let fg = Color::Rgb((r / 8) as u8, (gn / 8) as u8, (b / 8) as u8);
-                buf.set_grapheme(area.x + col as u16, area.y + row as u16, &g.to_string(), Style::default().fg(fg));
+                buf.set_char(area.x + col as u16, area.y + row as u16, g, Style::default().fg(fg));
             }
         }
     }
@@ -323,7 +323,7 @@ impl Video {
                 let top = self.shade(row as usize * 2, u, vt, sample(u, vt));
                 let bot = self.shade(row as usize * 2 + 1, u, vb, sample(u, vb));
                 let style = Style::default().fg(Color::Rgb(top.0, top.1, top.2)).bg(Color::Rgb(bot.0, bot.1, bot.2));
-                buf.set_grapheme(area.x + col, area.y + row, "▀", style);
+                buf.set_char(area.x + col, area.y + row, '▀', style);
             }
         }
     }

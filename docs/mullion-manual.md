@@ -110,9 +110,10 @@ wide↔tall.
 ### 3.2 The buffer and Terminal
 
 A `Buffer` is a grid of styled `Cell`s (a grapheme + `Style`), width-aware (a
-double-width grapheme occupies two cells). `set_string`/`set_grapheme` write into
-it; `Buffer::blit(&src, src_rect, dst_x, dst_y)` copies a sub-rectangle (used by
-smooth scrolling; blanks wide graphemes split at the copy boundary).
+double-width grapheme occupies two cells). `set_string`/`set_grapheme` write into it;
+`set_char` is the allocation-free fast path for one `char` per cell (the video/field
+encoders use it). `Buffer::blit(&src, src_rect, dst_x, dst_y)` copies a sub-rectangle
+(used by smooth scrolling; blanks wide graphemes split at the copy boundary).
 `Terminal::draw` does the diff-and-flush.
 
 ### 3.3 Borders
@@ -1364,7 +1365,7 @@ never decodes video itself).
 | `theme` | `Theme` (`default`, `light`, `border_style`) |
 | `capabilities` | `Capabilities` (`detect`, `full`, `from_env`) |
 | `charset` | `box_to_ascii` |
-| `buffer` | `Buffer` (`set_string`, `set_grapheme`, `blit`), `Cell` |
+| `buffer` | `Buffer` (`set_string`, `set_grapheme`, `set_char`, `blit`), `Cell` |
 | `backend` | `Backend`, `CrosstermBackend` (`apply_capabilities`, `set_color_depth`, `set_unicode`), `TestBackend` |
 | `terminal` | `Terminal`, `EventReader` (`new`, `try_recv`, `recv_timeout`, `drain`), `poll_event`, `read_event` |
 | `layout` | `solve`, `Node`, `Constraint`, `Size`, `Orientation`, `Axis` |
