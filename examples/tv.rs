@@ -22,15 +22,15 @@
 use std::io::{self, Read};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
-use std::{thread, time::Duration};
+use std::{thread, time::{Duration, Instant}};
 
 use crossterm::event::{Event, KeyCode, KeyEvent};
 
 use mullion::{
     backend::CrosstermBackend,
-    poll_event,
     style::{Color, Modifier, Style},
     video::{Dither, Encoding, Filter, Frame, Rgb, Sampling, Video},
+    EventReader,
     Buffer, Rect, Terminal,
 };
 
@@ -233,40 +233,49 @@ fn main() -> io::Result<()> {
 }
 
 fn run(term: &mut Terminal<CrosstermBackend<io::Stdout>>, mut source: Source) -> io::Result<()> {
+    // A background reader so a key only acts when you press it — even when a huge frame
+    // is slow to draw (otherwise queued events replay in bursts and modes seem to flip
+    // on their own).
+    let input = EventReader::new();
+    let budget = Duration::from_millis(60);
     let mut st = State { t: 0.0, encoding: Encoding::Braille, dither: Dither::Bayer, sampling: Sampling::Bilinear, filters: [false; 6], paused: false };
-    loop {
+    'frames: loop {
+        let start = Instant::now();
+        for ev in input.drain() {
+            if let Event::Key(KeyEvent { code, .. }) = ev {
+                match code {
+                    KeyCode::Char('q') => break 'frames,
+                    KeyCode::Char('e') => {
+                        st.encoding = match st.encoding {
+                            Encoding::Braille => Encoding::HalfBlock,
+                            Encoding::HalfBlock => Encoding::Braille,
+                        };
+                    }
+                    KeyCode::Char('d') => {
+                        st.dither = match st.dither {
+                            Dither::Bayer => Dither::FloydSteinberg,
+                            Dither::FloydSteinberg => Dither::Bayer,
+                        };
+                    }
+                    KeyCode::Char('n') => {
+                        st.sampling = match st.sampling {
+                            Sampling::Bilinear => Sampling::Nearest,
+                            Sampling::Nearest => Sampling::Bilinear,
+                        };
+                    }
+                    KeyCode::Char(' ') => st.paused = !st.paused,
+                    KeyCode::Char(c @ '1'..='6') => st.filters[c as usize - '1' as usize] ^= true,
+                    _ => {}
+                }
+            }
+        }
         let frame = source.frame(st.t);
         let label = source.label();
         term.draw(|buf| render(buf, &st, &frame, label))?;
-        if let Some(Event::Key(KeyEvent { code, .. })) = poll_event(Duration::from_millis(60))? {
-            match code {
-                KeyCode::Char('q') => break,
-                KeyCode::Char('e') => {
-                    st.encoding = match st.encoding {
-                        Encoding::Braille => Encoding::HalfBlock,
-                        Encoding::HalfBlock => Encoding::Braille,
-                    };
-                }
-                KeyCode::Char('d') => {
-                    st.dither = match st.dither {
-                        Dither::Bayer => Dither::FloydSteinberg,
-                        Dither::FloydSteinberg => Dither::Bayer,
-                    };
-                }
-                KeyCode::Char('n') => {
-                    st.sampling = match st.sampling {
-                        Sampling::Bilinear => Sampling::Nearest,
-                        Sampling::Nearest => Sampling::Bilinear,
-                    };
-                }
-                KeyCode::Char(' ') => st.paused = !st.paused,
-                KeyCode::Char(c @ '1'..='6') => st.filters[c as usize - '1' as usize] ^= true,
-                _ => {}
-            }
-        }
         if !st.paused {
             st.t += 0.08;
         }
+        thread::sleep(budget.saturating_sub(start.elapsed()));
     }
     Ok(())
 }
