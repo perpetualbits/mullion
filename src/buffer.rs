@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 // Copyright (C) 2026  Epsilon Null Operation
 use unicode_segmentation::UnicodeSegmentation;
-use unicode_width::UnicodeWidthStr;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::{
     geometry::Rect,
@@ -253,6 +253,64 @@ impl Buffer {
         x + w
     }
 
+    /// Write a single `char` at `(x, y)` — the **allocation-free** fast path for the
+    /// common case of one character per cell (the video encoders, block/braille fills).
+    ///
+    /// Matches [`set_grapheme`](Self::set_grapheme) with a one-char string for every
+    /// printable, combining, and wide character — same width handling (0 = combining
+    /// mark attached to the previous cell, 1 = narrow, 2 = wide with a continuation
+    /// cell, no-fit = space placeholder) and the same `unlink_wide_at` invariant — but
+    /// it takes a `char` directly, so the caller allocates no `String` and the cell's
+    /// own allocation is reused.
+    ///
+    /// One edge differs from `set_grapheme`: a **control** character is treated as
+    /// zero-width here (via [`UnicodeWidthChar`], which reports control chars as having
+    /// no width) rather than `set_grapheme`'s width-1. Cells should hold display
+    /// glyphs, so do not route control characters through either method.
+    ///
+    /// # Returns
+    /// The x position immediately after the char (or `x` for a zero-width char).
+    pub fn set_char(&mut self, x: u16, y: u16, ch: char, style: Style) -> u16 {
+        if x >= self.area.right() || y >= self.area.bottom() || y < self.area.y {
+            return x;
+        }
+        let w = UnicodeWidthChar::width(ch).unwrap_or(0) as u16;
+        if w == 0 {
+            // Zero-width (combining mark / control): attach to the preceding cell, or
+            // drop it if there is none on this row.
+            if x > self.area.x {
+                let i = self.idx(x - 1, y);
+                self.cells[i].symbol.push(ch);
+            }
+            return x;
+        }
+        if x + w > self.area.right() {
+            // A wide char must not split across the right edge: write a space instead.
+            self.unlink_wide_at(x, y);
+            let i = self.idx(x, y);
+            let c = &mut self.cells[i];
+            c.symbol.clear();
+            c.symbol.push(' ');
+            c.style = style;
+            return x + 1;
+        }
+        self.unlink_wide_at(x, y);
+        let i = self.idx(x, y);
+        let c = &mut self.cells[i];
+        c.symbol.clear();
+        c.symbol.push(ch);
+        c.style = style;
+        if w == 2 && x + 1 < self.area.right() {
+            // Mark the column to the right as a continuation (empty symbol).
+            self.unlink_wide_at(x + 1, y);
+            let j = self.idx(x + 1, y);
+            let c = &mut self.cells[j];
+            c.symbol.clear();
+            c.style = style;
+        }
+        x + w
+    }
+
     /// Write every grapheme in `s` left-to-right starting at `(x, y)`.
     ///
     /// Uses `unicode-segmentation` to split `s` into grapheme clusters so that
@@ -415,6 +473,42 @@ mod tests {
 
     fn buf(w: u16, h: u16) -> Buffer {
         Buffer::empty(Rect::new(0, 0, w, h))
+    }
+
+    #[test]
+    fn set_char_matches_set_grapheme() {
+        // set_char must be byte-for-byte equivalent to set_grapheme(&ch.to_string())
+        // across narrow, wide, zero-width-combining, and edge-spill cases.
+        for &(w, ch) in &[(6u16, 'A'), (6, '世'), (6, '▀'), (3, '世')] {
+            let mut a = buf(w, 1);
+            let mut g = buf(w, 1);
+            // place at x=2 to exercise the wide/spill boundary in the 3-wide case
+            a.set_char(2, 0, ch, Style::default());
+            g.set_grapheme(2, 0, &ch.to_string(), Style::default());
+            for x in 0..w {
+                assert_eq!(a.get(x, 0), g.get(x, 0), "mismatch at ({x}) for {ch:?} width {w}");
+            }
+        }
+    }
+
+    #[test]
+    fn set_char_treats_control_chars_as_zero_width() {
+        // Control chars report no display width (UnicodeWidthChar::width → None), so
+        // set_char does not advance the cursor or occupy a cell. (This is the one
+        // documented divergence from set_grapheme, whose UnicodeWidthStr counts 1.)
+        let mut b = buf(4, 1);
+        let next = b.set_char(0, 0, '\t', Style::default());
+        assert_eq!(next, 0, "a control char does not advance the cursor");
+        assert_eq!(b.get(0, 0).symbol, " ", "and occupies no cell");
+    }
+
+    #[test]
+    fn set_char_combining_attaches_to_previous_cell() {
+        let mut b = buf(4, 1);
+        b.set_char(0, 0, 'e', Style::default());
+        let next = b.set_char(1, 0, '\u{0301}', Style::default()); // combining acute
+        assert_eq!(next, 1, "zero-width char does not advance the cursor");
+        assert_eq!(b.get(0, 0).symbol, "e\u{0301}");
     }
 
     #[test]

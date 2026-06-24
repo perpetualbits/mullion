@@ -205,7 +205,7 @@ impl Field {
                 }
                 let g = char::from_u32(0x2800 + mask as u32).unwrap_or(' ');
                 let (cu, cv) = self.cell_centre(col, row);
-                buf.set_grapheme(x, y, &g.to_string(), style(sum / 8.0, cu, cv));
+                buf.set_char(x, y, g, style(sum / 8.0, cu, cv));
             }
         }
     }
@@ -257,7 +257,7 @@ impl Field {
                 let mean = sum / 4.0;
                 let idx = ((mean * (ramp.len() - 1) as f32).round() as usize).min(ramp.len() - 1);
                 let (cu, cv) = self.cell_centre(col, row);
-                buf.set_grapheme(x, y, &ramp[idx].to_string(), style(mean, cu, cv));
+                buf.set_char(x, y, ramp[idx], style(mean, cu, cv));
             }
         }
     }
@@ -320,7 +320,7 @@ impl Field {
                     ramp[idx]
                 };
                 let (cu, cv) = self.cell_centre(col, row);
-                buf.set_grapheme(x, y, &glyph.to_string(), style(density, cu, cv));
+                buf.set_char(x, y, glyph, style(density, cu, cv));
             }
         }
     }
