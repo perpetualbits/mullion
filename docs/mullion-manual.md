@@ -1331,6 +1331,12 @@ cheap and **temporally stable**, but a regular cross-hatch in flat areas) or
 dissolving the grid into an organic stipple; higher fidelity on stills, can shimmer
 slightly in motion).
 
+A **`Sampling`** mode controls how a `Frame` is resampled to the grid: `Bilinear` (the
+faithful default — blends the four nearest pixels) or `Nearest` (one pixel, ~2× faster,
+with a minor quality loss the dither largely hides — good for fast or small panels).
+The frame taps are precomputed once per axis, so `render_frame` does not re-derive them
+per sub-pixel.
+
 Effects are opt-in **`Filter`**s applied after sampling, in order: `Scanlines` and
 `Vignette` (CRT geometry), `Phosphor { hue, sat }` (monochrome tube tint), and the
 colour grades `Gamma` / `Saturation` / `Grayscale`. With no filters the output is a
@@ -1345,8 +1351,8 @@ Video::new()                                  // faithful by default…
 ```
 
 Demo: `cargo run --example tv` — a synthesised colour-bar signal; `e` switches
-encoding, `d` switches dither, `1`–`6` toggle the filters, so you can watch fidelity
-first and effects on top. Pass a clip — `cargo run --example tv -- clip.mp4` — and it
+encoding, `d` switches dither, `n` switches sampling, `1`–`6` toggle the filters, so you
+can watch fidelity first and effects on top. Pass a clip — `cargo run --example tv -- clip.mp4` — and it
 plays **real footage** through an `ffmpeg` decode (the demo spawns ffmpeg; mullion
 never decodes video itself).
 
@@ -1361,7 +1367,7 @@ never decodes video itself).
 | `ease` | `smoothstep`, `lerp`, `gaussian` |
 | `field` | `Field` (`rect`, `strip`, `perimeter`, `paint`, `render_braille`/`_xy`, `render_ramp`/`_xy`, `render_glyphs`/`_xy`), `BLOCK_RAMP`, `ASCII_RAMP` |
 | `colorfield` | `Flame` (`new`, `seeded`, `step`, `at`), `Reaction` (`new`, `seeded`, `step`, `at`, `SPOTS`/`MITOSIS`/`MAZE`/`CORAL`), `Wave` (`plasma`, `flag`, `value`), `Palette` (`Fire`/`Ice`/`Rainbow`, `color`) |
-| `video` | `Video` (`new`, `encoding`, `dither`, `filter`, `render_frame`, `render`), `Frame` (`from_rgb`, `from_luma`, `sample`), `Encoding` (`Braille`/`HalfBlock`), `Dither` (`Bayer`/`FloydSteinberg`), `Filter` (`Scanlines`/`Vignette`/`Phosphor`/`Gamma`/`Saturation`/`Grayscale`), `Rgb` |
+| `video` | `Video` (`new`, `encoding`, `dither`, `sampling`, `filter`, `render_frame`, `render`), `Frame` (`from_rgb`, `from_luma`, `sample`), `Encoding` (`Braille`/`HalfBlock`), `Dither` (`Bayer`/`FloydSteinberg`), `Sampling` (`Bilinear`/`Nearest`), `Filter` (`Scanlines`/`Vignette`/`Phosphor`/`Gamma`/`Saturation`/`Grayscale`), `Rgb` |
 | `theme` | `Theme` (`default`, `light`, `border_style`) |
 | `capabilities` | `Capabilities` (`detect`, `full`, `from_env`) |
 | `charset` | `box_to_ascii` |

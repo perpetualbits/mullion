@@ -261,17 +261,19 @@ impl Reaction {
     /// (centre `−1`, orthogonal neighbours `0.2`, diagonals `0.05`), edges wrapping.
     fn laplacian(&self, x: usize, y: usize) -> (f32, f32) {
         let (w, h) = (self.width as usize, self.height as usize);
-        let (xm, xp) = ((x + w - 1) % w, (x + 1) % w);
-        let (ym, yp) = ((y + h - 1) % h, (y + 1) % h);
-        let f = &self.u;
-        let g = &self.v;
-        let idx = |xx: usize, yy: usize| yy * w + xx;
+        // Branchless toroidal wrap — a compare instead of a `%` division per neighbour.
+        let xm = if x == 0 { w - 1 } else { x - 1 };
+        let xp = if x + 1 == w { 0 } else { x + 1 };
+        let ym = if y == 0 { h - 1 } else { y - 1 };
+        let yp = if y + 1 == h { 0 } else { y + 1 };
+        // Precompute the three row base offsets so each access is one add, not `yy*w`.
+        let (rc, ra, rb) = (y * w, ym * w, yp * w);
         let lap = |a: &[f32]| {
-            -a[idx(x, y)]
-                + 0.2 * (a[idx(xm, y)] + a[idx(xp, y)] + a[idx(x, ym)] + a[idx(x, yp)])
-                + 0.05 * (a[idx(xm, ym)] + a[idx(xp, ym)] + a[idx(xm, yp)] + a[idx(xp, yp)])
+            -a[rc + x]
+                + 0.2 * (a[rc + xm] + a[rc + xp] + a[ra + x] + a[rb + x])
+                + 0.05 * (a[ra + xm] + a[ra + xp] + a[rb + xm] + a[rb + xp])
         };
-        (lap(f), lap(g))
+        (lap(&self.u), lap(&self.v))
     }
 
     /// Seed a central blob of `V` (with `U` halved there) plus sparse random specks, so
