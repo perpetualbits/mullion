@@ -1324,6 +1324,12 @@ against colour resolution:
 - **`HalfBlock`** — `▀` with the upper source pixel as foreground and the lower as
   background: full colour at 1×2 pixels per cell.
 
+For braille, a **`Dither`** chooses how sub-pixels are quantised: `Bayer` (ordered —
+cheap and **temporally stable**, but a regular cross-hatch in flat areas) or
+`FloydSteinberg` (error diffusion — scatters the quantisation error into neighbours,
+dissolving the grid into an organic stipple; higher fidelity on stills, can shimmer
+slightly in motion).
+
 Effects are opt-in **`Filter`**s applied after sampling, in order: `Scanlines` and
 `Vignette` (CRT geometry), `Phosphor { hue, sat }` (monochrome tube tint), and the
 colour grades `Gamma` / `Saturation` / `Grayscale`. With no filters the output is a
@@ -1338,8 +1344,10 @@ Video::new()                                  // faithful by default…
 ```
 
 Demo: `cargo run --example tv` — a synthesised colour-bar signal; `e` switches
-encoding, `1`–`6` toggle the filters, so you can watch fidelity first and effects on
-top.
+encoding, `d` switches dither, `1`–`6` toggle the filters, so you can watch fidelity
+first and effects on top. Pass a clip — `cargo run --example tv -- clip.mp4` — and it
+plays **real footage** through an `ffmpeg` decode (the demo spawns ffmpeg; mullion
+never decodes video itself).
 
 ---
 
@@ -1352,7 +1360,7 @@ top.
 | `ease` | `smoothstep`, `lerp`, `gaussian` |
 | `field` | `Field` (`rect`, `strip`, `perimeter`, `paint`, `render_braille`/`_xy`, `render_ramp`/`_xy`, `render_glyphs`/`_xy`), `BLOCK_RAMP`, `ASCII_RAMP` |
 | `colorfield` | `Flame` (`new`, `seeded`, `step`, `at`), `Reaction` (`new`, `seeded`, `step`, `at`, `SPOTS`/`MITOSIS`/`MAZE`/`CORAL`), `Wave` (`plasma`, `flag`, `value`), `Palette` (`Fire`/`Ice`/`Rainbow`, `color`) |
-| `video` | `Video` (`new`, `encoding`, `filter`, `render_frame`, `render`), `Frame` (`from_rgb`, `from_luma`, `sample`), `Encoding` (`Braille`/`HalfBlock`), `Filter` (`Scanlines`/`Vignette`/`Phosphor`/`Gamma`/`Saturation`/`Grayscale`), `Rgb` |
+| `video` | `Video` (`new`, `encoding`, `dither`, `filter`, `render_frame`, `render`), `Frame` (`from_rgb`, `from_luma`, `sample`), `Encoding` (`Braille`/`HalfBlock`), `Dither` (`Bayer`/`FloydSteinberg`), `Filter` (`Scanlines`/`Vignette`/`Phosphor`/`Gamma`/`Saturation`/`Grayscale`), `Rgb` |
 | `theme` | `Theme` (`default`, `light`, `border_style`) |
 | `capabilities` | `Capabilities` (`detect`, `full`, `from_env`) |
 | `charset` | `box_to_ascii` |
@@ -1785,9 +1793,11 @@ glyph (`s` source, `p` palette, `t` blocks ↔ text, `r` reseed).
 cargo run --example colorfield
 ```
 
-**`examples/tv.rs`** — the §3.28 `Video` widget: a synthesised colour-bar signal
-reproduced faithfully in truecolour, with `e` to switch braille/half-block encoding and
-`1`–`6` to toggle the CRT/grading filters.
+**`examples/tv.rs`** — the §3.28 `Video` widget: a synthesised colour-bar signal (or
+**real footage** via `cargo run --example tv -- clip.mp4`, decoded by `ffmpeg`),
+reproduced faithfully in truecolour, with `e` to switch braille/half-block encoding,
+`d` to switch Bayer/Floyd–Steinberg dither, and `1`–`6` to toggle the CRT/grading
+filters.
 
 ```text
 cargo run --example tv
