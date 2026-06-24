@@ -1305,6 +1305,42 @@ a layout, press `t` to teach** the engine your real correction, `a` to re-lay-ou
 under your learned taste. (A term that never varies across your corrections — e.g. no
 edge ever crosses a node — carries no signal and keeps a small bounded weight.)
 
+### 3.28 Video widget — `mullion::video`
+
+Where §3.26's encoders map *any* `intensity(u, v)` to cells, the **`Video`** widget is
+the finished article for **moving pictures**: it reproduces a source frame as
+faithfully as the terminal allows, in **truecolour**, and treats every *effect* as an
+opt-in filter. Colour serves the picture — a grey clip stays grey, a colour clip keeps
+its hues — never decoration.
+
+You supply pixels (the widget does **not** decode video): a **`Frame`** — a `W×H`
+RGB/luma buffer, e.g. straight from `ffmpeg … -pix_fmt gray -f rawvideo` — which it
+samples **bilinearly**, so one frame resamples to any window size; or a
+`sample(u, v) -> Rgb` closure for a live source. Two cell **`Encoding`**s trade detail
+against colour resolution:
+
+- **`Braille`** — 2×4 dithered luminance sub-pixels tinted by the cell's average
+  colour: most spatial detail, one colour per cell.
+- **`HalfBlock`** — `▀` with the upper source pixel as foreground and the lower as
+  background: full colour at 1×2 pixels per cell.
+
+Effects are opt-in **`Filter`**s applied after sampling, in order: `Scanlines` and
+`Vignette` (CRT geometry), `Phosphor { hue, sat }` (monochrome tube tint), and the
+colour grades `Gamma` / `Saturation` / `Grayscale`. With no filters the output is a
+straight reproduction.
+
+```rust
+let frame = Frame::from_luma(w, h, &luma);   // an ffmpeg `gray` frame
+Video::new()                                  // faithful by default…
+    .encoding(Encoding::HalfBlock)
+    .filter(Filter::Scanlines(0.3))           // …CRT look is opt-in
+    .render_frame(buf, area, &frame);
+```
+
+Demo: `cargo run --example tv` — a synthesised colour-bar signal; `e` switches
+encoding, `1`–`6` toggle the filters, so you can watch fidelity first and effects on
+top.
+
 ---
 
 ## 4. API reference by module
@@ -1316,6 +1352,7 @@ edge ever crosses a node — carries no signal and keeps a small bounded weight.
 | `ease` | `smoothstep`, `lerp`, `gaussian` |
 | `field` | `Field` (`rect`, `strip`, `perimeter`, `paint`, `render_braille`/`_xy`, `render_ramp`/`_xy`, `render_glyphs`/`_xy`), `BLOCK_RAMP`, `ASCII_RAMP` |
 | `colorfield` | `Flame` (`new`, `seeded`, `step`, `at`), `Reaction` (`new`, `seeded`, `step`, `at`, `SPOTS`/`MITOSIS`/`MAZE`/`CORAL`), `Wave` (`plasma`, `flag`, `value`), `Palette` (`Fire`/`Ice`/`Rainbow`, `color`) |
+| `video` | `Video` (`new`, `encoding`, `filter`, `render_frame`, `render`), `Frame` (`from_rgb`, `from_luma`, `sample`), `Encoding` (`Braille`/`HalfBlock`), `Filter` (`Scanlines`/`Vignette`/`Phosphor`/`Gamma`/`Saturation`/`Grayscale`), `Rgb` |
 | `theme` | `Theme` (`default`, `light`, `border_style`) |
 | `capabilities` | `Capabilities` (`detect`, `full`, `from_env`) |
 | `charset` | `box_to_ascii` |
@@ -1746,6 +1783,14 @@ glyph (`s` source, `p` palette, `t` blocks ↔ text, `r` reseed).
 
 ```text
 cargo run --example colorfield
+```
+
+**`examples/tv.rs`** — the §3.28 `Video` widget: a synthesised colour-bar signal
+reproduced faithfully in truecolour, with `e` to switch braille/half-block encoding and
+`1`–`6` to toggle the CRT/grading filters.
+
+```text
+cargo run --example tv
 ```
 
 **`examples/teach.rs`** — the §3.27 learnable layout, interactive: the engine lays a
