@@ -221,14 +221,22 @@ impl Buffer {
             // after we overwrite the continuation with a space.
             self.unlink_wide_at(x, y);
             let i = self.idx(x, y);
-            self.cells[i] = Cell { symbol: " ".into(), style };
+            let c = &mut self.cells[i];
+            c.symbol.clear();
+            c.symbol.push(' ');
+            c.style = style;
             return x + 1; // consumed column x with a space; next position is x+1
         }
 
-        // Normal write: unlink any prior pair, then install the grapheme.
+        // Normal write: unlink any prior pair, then install the grapheme — reusing
+        // the cell's existing allocation (clear + push) so a per-cell write is
+        // allocation-free.
         self.unlink_wide_at(x, y);
         let i = self.idx(x, y);
-        self.cells[i] = Cell { symbol: grapheme.into(), style };
+        let c = &mut self.cells[i];
+        c.symbol.clear();
+        c.symbol.push_str(grapheme);
+        c.style = style;
 
         if w == 2 {
             // Mark the column to the right as a continuation so the renderer
@@ -236,7 +244,9 @@ impl Buffer {
             if x + 1 < self.area.right() {
                 self.unlink_wide_at(x + 1, y); // clear anything that was there
                 let j = self.idx(x + 1, y);
-                self.cells[j] = Cell { symbol: String::new(), style };
+                let c = &mut self.cells[j];
+                c.symbol.clear(); // empty symbol marks the continuation cell
+                c.style = style;
             }
         }
 
@@ -325,8 +335,12 @@ impl Buffer {
 
     /// Reset every cell to the default (a space with the default style).
     pub fn reset(&mut self) {
+        // Reuse each cell's existing `String` allocation (clear + push) rather than
+        // dropping and re-allocating it, so resetting a frame does no heap work.
         for c in &mut self.cells {
-            *c = Cell::default();
+            c.symbol.clear();
+            c.symbol.push(' ');
+            c.style = Style::default();
         }
     }
 

@@ -2,13 +2,15 @@
 // Copyright (C) 2026  Epsilon Null Operation
 use std::io::{self, Write};
 
+use unicode_width::UnicodeWidthStr;
+
 use crossterm::{
     cursor::{Hide, MoveTo, Show},
     event::{DisableMouseCapture, EnableMouseCapture},
     execute, queue,
     style::{
-        Attribute, Color as CtColor, Colors, Print, ResetColor, SetAttribute,
-        SetColors,
+        Attribute, Color as CtColor, Colors, Print, SetAttribute, SetBackgroundColor,
+        SetColors, SetForegroundColor,
     },
     terminal::{
         self, disable_raw_mode, enable_raw_mode, size, EnterAlternateScreen,
@@ -247,34 +249,55 @@ fn to_ct_color(c: Color) -> CtColor {
     }
 }
 
-/// Queue the SGR (Select Graphic Rendition) sequences for `style` onto `w`.
+/// Queue the SGR sequences to move the terminal from `from` to `to` — a **minimal
+/// delta**, so a run of cells that only change colour does not re-emit a full reset.
 ///
-/// Uses a reset-then-set strategy: it emits `ResetColor` + `Attribute::Reset`
-/// first, then the desired colors and modifiers.  This is more bytes than a
-/// minimal delta but guarantees correctness: a purely additive approach would
-/// leave stale attributes (e.g. bold, underline) set from a previous cell.
-fn emit_style<W: Write>(w: &mut W, style: Style) -> io::Result<()> {
-    // Reset all prior attributes before applying the new ones.  Without this,
-    // attributes from the previous cell (e.g. bold) would bleed into cells that
-    // do not set them, because the terminal accumulates SGR state.
-    queue!(w, ResetColor, SetAttribute(Attribute::Reset))?;
-    // Set colors in one combined SetColors call for efficiency.
-    queue!(w, SetColors(Colors::new(to_ct_color(style.fg), to_ct_color(style.bg))))?;
-    // Only queue attribute sequences that are actually active; the terminal's
-    // SGR state for the rest was already cleared by the reset above.
-    if style.mods.contains(Modifier::BOLD) {
+/// A terminal accumulates SGR state, so *removing* an attribute (e.g. bold) needs a
+/// `\x1b[0m` reset followed by re-applying everything. But the common case — same
+/// modifiers, a different colour (e.g. video, where every cell recolours) — emits
+/// just the changed colour. `from` is `None` before the first cell, which forces the
+/// reset path to establish a known state.
+fn emit_style<W: Write>(w: &mut W, from: Option<Style>, to: Style) -> io::Result<()> {
+    // A reset is required when we have no known prior state, or when any modifier was
+    // turned off (only `\x1b[0m` can clear an attribute).
+    let reset = match from {
+        None => true,
+        Some(f) => !f.mods.difference(to.mods).is_empty(),
+    };
+    if reset {
+        // `\x1b[0m` clears all attributes *and* colours, so re-apply the full style.
+        queue!(w, SetAttribute(Attribute::Reset))?;
+        queue!(w, SetColors(Colors::new(to_ct_color(to.fg), to_ct_color(to.bg))))?;
+        emit_mods(w, to.mods)?;
+    } else {
+        let from = from.unwrap(); // `None` took the reset path above
+        if to.fg != from.fg {
+            queue!(w, SetForegroundColor(to_ct_color(to.fg)))?;
+        }
+        if to.bg != from.bg {
+            queue!(w, SetBackgroundColor(to_ct_color(to.bg)))?;
+        }
+        // Only modifiers newly added (none were removed, or we'd have reset).
+        emit_mods(w, to.mods.difference(from.mods))?;
+    }
+    Ok(())
+}
+
+/// Queue `SetAttribute` for each modifier present in `mods`.
+fn emit_mods<W: Write>(w: &mut W, mods: Modifier) -> io::Result<()> {
+    if mods.contains(Modifier::BOLD) {
         queue!(w, SetAttribute(Attribute::Bold))?;
     }
-    if style.mods.contains(Modifier::DIM) {
+    if mods.contains(Modifier::DIM) {
         queue!(w, SetAttribute(Attribute::Dim))?;
     }
-    if style.mods.contains(Modifier::ITALIC) {
+    if mods.contains(Modifier::ITALIC) {
         queue!(w, SetAttribute(Attribute::Italic))?;
     }
-    if style.mods.contains(Modifier::UNDERLINE) {
+    if mods.contains(Modifier::UNDERLINE) {
         queue!(w, SetAttribute(Attribute::Underlined))?;
     }
-    if style.mods.contains(Modifier::REVERSE) {
+    if mods.contains(Modifier::REVERSE) {
         queue!(w, SetAttribute(Attribute::Reverse))?;
     }
     Ok(())
@@ -290,7 +313,14 @@ impl<W: Write> Backend for CrosstermBackend<W> {
     /// Apply changed cells to the terminal, minimizing SGR output.
     ///
     /// For each `(col, row, cell)` in `changes`:
-    /// 1. Move the cursor to `(col, row)`.
+    /// 1. Move the cursor to `(col, row)` — **only if it is not already there**.
+    ///    After printing a glyph the terminal auto-advances the cursor by the
+    ///    glyph's width, so a run of adjacent changed cells (the common case in a
+    ///    repaint, since the diff is row-major) needs just one `MoveTo` at its
+    ///    start, not one per cell. We track the expected cursor column and skip the
+    ///    move when the next cell is exactly where the cursor already sits. (A cell
+    ///    at `x + width` can only exist when `x + width` is on-screen, so this never
+    ///    skips a move across a line wrap.)
     /// 2. Emit a new SGR run **only if** the cell's style differs from the last
     ///    emitted style (`last_style`), avoiding redundant escape sequences for
     ///    consecutive cells that share the same style.
@@ -307,8 +337,14 @@ impl<W: Write> Backend for CrosstermBackend<W> {
     ) -> io::Result<()> {
         let depth   = self.color_depth;
         let unicode = self.unicode;
+        // Where the cursor will sit after the last print, or `None` if unknown
+        // (start of frame, or after a gap). Reset each call so a new frame always
+        // begins with an explicit move.
+        let mut cursor: Option<(u16, u16)> = None;
         for (x, y, cell) in changes {
-            queue!(self.writer, MoveTo(x, y))?;
+            if cursor != Some((x, y)) {
+                queue!(self.writer, MoveTo(x, y))?;
+            }
             // Downsample the cell's fg/bg before comparing and emitting so that
             // last_style always tracks what was actually sent to the terminal.
             let style = Style {
@@ -317,8 +353,8 @@ impl<W: Write> Backend for CrosstermBackend<W> {
                 mods: cell.style.mods,
             };
             if self.last_style != Some(style) {
-                // Style changed: emit a new SGR sequence and record it.
-                emit_style(&mut self.writer, style)?;
+                // Style changed: emit the minimal SGR delta from the last style.
+                emit_style(&mut self.writer, self.last_style, style)?;
                 self.last_style = Some(style);
             }
             if unicode {
@@ -328,6 +364,9 @@ impl<W: Write> Backend for CrosstermBackend<W> {
                 let mapped: String = cell.symbol.chars().map(box_to_ascii).collect();
                 queue!(self.writer, Print(mapped))?;
             }
+            // The terminal advanced the cursor past the glyph (width 1 or 2).
+            let w = UnicodeWidthStr::width(cell.symbol.as_str()).max(1) as u16;
+            cursor = Some((x + w, y));
         }
         Ok(())
     }
@@ -507,6 +546,60 @@ mod tests {
         } // drop backend to release &mut buf borrow
         let out = String::from_utf8_lossy(&buf);
         assert!(out.contains("38;2;"), "TrueColor must emit truecolor fg: {out:?}");
+    }
+
+    #[test]
+    fn adjacent_cells_share_one_move() {
+        use crate::buffer::Cell;
+        use crate::style::Style;
+        let (a, b) = (Cell { symbol: "X".into(), style: Style::default() },
+                      Cell { symbol: "Y".into(), style: Style::default() });
+        let mut buf = Vec::<u8>::new();
+        {
+            let mut backend = CrosstermBackend::new(&mut buf);
+            backend.draw([(0u16, 0u16, &a), (1u16, 0u16, &b)].into_iter()).unwrap();
+        }
+        let out = String::from_utf8_lossy(&buf);
+        assert!(out.contains("\x1b[1;1H"), "first cell needs a move: {out:?}");
+        assert!(!out.contains("\x1b[1;2H"), "adjacent cell must not re-emit a move: {out:?}");
+    }
+
+    #[test]
+    fn gap_between_cells_emits_a_move() {
+        use crate::buffer::Cell;
+        use crate::style::Style;
+        let (a, b) = (Cell { symbol: "X".into(), style: Style::default() },
+                      Cell { symbol: "Y".into(), style: Style::default() });
+        let mut buf = Vec::<u8>::new();
+        {
+            let mut backend = CrosstermBackend::new(&mut buf);
+            backend.draw([(0u16, 0u16, &a), (5u16, 0u16, &b)].into_iter()).unwrap();
+        }
+        let out = String::from_utf8_lossy(&buf);
+        assert!(out.contains("\x1b[1;6H"), "non-adjacent cell needs its own move: {out:?}");
+    }
+
+    #[test]
+    fn emit_style_colour_only_change_skips_reset() {
+        use crate::style::{Modifier, Style};
+        let from = Style { fg: Color::Red, bg: Color::Reset, mods: Modifier::BOLD };
+        let to = Style { fg: Color::Blue, bg: Color::Reset, mods: Modifier::BOLD };
+        let mut buf = Vec::<u8>::new();
+        emit_style(&mut buf, Some(from), to).unwrap();
+        let out = String::from_utf8_lossy(&buf);
+        assert!(!out.contains("\x1b[0m"), "same modifiers + colour change must not reset: {out:?}");
+        assert!(!out.is_empty(), "the colour change must still be emitted");
+    }
+
+    #[test]
+    fn emit_style_removing_a_modifier_resets() {
+        use crate::style::{Modifier, Style};
+        let from = Style { fg: Color::Red, bg: Color::Reset, mods: Modifier::BOLD };
+        let to = Style { fg: Color::Red, bg: Color::Reset, mods: Modifier::empty() };
+        let mut buf = Vec::<u8>::new();
+        emit_style(&mut buf, Some(from), to).unwrap();
+        let out = String::from_utf8_lossy(&buf);
+        assert!(out.contains("\x1b[0m"), "removing a modifier must emit a reset: {out:?}");
     }
 
     #[test]
