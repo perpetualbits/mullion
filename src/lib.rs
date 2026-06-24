@@ -111,7 +111,7 @@ pub use text::{
 pub use style::{Color, ColorDepth, Modifier, Style};
 pub use theme::Theme;
 pub use video::{Dither, Encoding, Filter, Frame, Rgb, Video};
-pub use terminal::{poll_event, read_event, Terminal};
+pub use terminal::{poll_event, read_event, EventReader, Terminal};
 pub use render::render_carousel;
 pub use tree::{
     focus_override, focus_path, id_from_key, leaves, node_by_id, node_by_id_mut, node_id,

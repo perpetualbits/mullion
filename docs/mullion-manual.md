@@ -1366,7 +1366,7 @@ never decodes video itself).
 | `charset` | `box_to_ascii` |
 | `buffer` | `Buffer` (`set_string`, `set_grapheme`, `blit`), `Cell` |
 | `backend` | `Backend`, `CrosstermBackend` (`apply_capabilities`, `set_color_depth`, `set_unicode`), `TestBackend` |
-| `terminal` | `Terminal` |
+| `terminal` | `Terminal`, `EventReader` (`new`, `try_recv`, `recv_timeout`, `drain`), `poll_event`, `read_event` |
 | `layout` | `solve`, `Node`, `Constraint`, `Size`, `Orientation`, `Axis` |
 | `tree` | `Tree`, `Dir`, `Direction`, `tile_id_of`, `node_id`, `id_from_key`, `leaves`, `focus_path`, `focus_override`, `node_by_id`/`node_by_id_mut`, `reconcile_carousel`, `reconcile_split` |
 | `layout` (module) | `solve`, `region_of`, `carousel_visible_range`, `min_size` |
@@ -1634,6 +1634,46 @@ That is the whole architecture: central state joined to the tree by `TileId`,
 `reconcile_carousel` on the data clock, a render that dispatches between carousel and
 drilled-in tile, and app-owned input — every other feature (labels, theming, mouse,
 `focus_dir_cross`, degraded fallback) slots into these same four methods.
+
+### 5.6 Snappy input under load — `EventReader`
+
+The `poll_event`-once-per-frame loop above is fine until a frame gets *heavy* (a big
+terminal full of video, say). Then three responsiveness traps bite: input is only
+checked **after** the slow `draw`; only **one** event is handled per frame, so a burst
+drains slowly; and a high-frequency `Mouse`/`Resize` stream **starves the keyboard**,
+because the frame's single `poll_event` may return a non-key event. A keypress can take
+many frames to land.
+
+**`EventReader`** decouples input *capture* from rendering. A background thread blocks
+on the event source and forwards every event over a channel the instant it arrives — so
+capture is independent of how long `draw` takes — and the loop **drains all** pending
+events each frame, so bursts collapse and mouse never starves keys:
+
+```rust
+use mullion::EventReader;
+use crossterm::event::{Event, KeyCode};
+use std::time::{Duration, Instant};
+
+let input = EventReader::new();
+let frame = Duration::from_millis(16);
+loop {
+    let start = Instant::now();
+    for ev in input.drain() {                 // handle EVERY queued event this frame
+        if let Event::Key(k) = ev {
+            if k.code == KeyCode::Char('q') { return; }
+        }
+    }
+    term.draw(|buf| app.render(buf))?;        // even a slow draw can't delay capture
+    std::thread::sleep(frame.saturating_sub(start.elapsed())); // pace the frame
+}
+```
+
+`try_recv` (one event, non-blocking) and `recv_timeout` (block until input or a
+deadline — for apps that redraw only on input) are also available. While an
+`EventReader` lives, take input **only** through it, not `poll_event`/`read_event`;
+dropping it stops and joins the thread. Together with the buffer/backend render
+optimizations (shorter frames) this is the whole responsiveness story: faster frames
+*and* input that never waits on a frame.
 
 ---
 

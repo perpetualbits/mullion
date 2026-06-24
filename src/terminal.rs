@@ -1,6 +1,11 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 // Copyright (C) 2026  Epsilon Null Operation
 use std::io;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Receiver};
+use std::sync::Arc;
+use std::thread::{self, JoinHandle};
+use std::time::Duration;
 
 use crossterm::event::{self, Event};
 
@@ -159,5 +164,124 @@ pub fn poll_event(timeout: std::time::Duration) -> io::Result<Option<Event>> {
         Ok(Some(event::read()?))
     } else {
         Ok(None)
+    }
+}
+
+/// A background **event reader** that decouples input *capture* from rendering, so a
+/// keypress never waits on a slow frame.
+///
+/// The classic `draw(); poll_event(timeout)` loop has three responsiveness traps under
+/// load: input is only checked *after* a slow draw; only one event is handled per
+/// frame (a burst drains slowly); and a high-frequency `Mouse`/`Resize` stream starves
+/// the keyboard, because each frame's single `poll_event` may return a non-key event.
+///
+/// `EventReader` fixes all three. A dedicated thread blocks on the terminal's event
+/// source and forwards every event over a channel the instant it arrives — so capture
+/// is independent of how long `draw` takes. The main loop then [`drain`](Self::drain)s
+/// **all** pending events each frame:
+///
+/// ```no_run
+/// use std::time::{Duration, Instant};
+/// use mullion::{EventReader, Terminal, backend::CrosstermBackend};
+/// use crossterm::event::{Event, KeyCode};
+/// # fn demo(term: &mut Terminal<CrosstermBackend<std::io::Stdout>>) -> std::io::Result<()> {
+/// let input = EventReader::new();
+/// let frame = Duration::from_millis(16);
+/// loop {
+///     let start = Instant::now();
+///     for ev in input.drain() {                 // handle EVERY queued event this frame
+///         if let Event::Key(k) = ev {
+///             if k.code == KeyCode::Char('q') { return Ok(()); }
+///         }
+///     }
+///     term.draw(|buf| { /* ... */ })?;          // even a slow draw can't delay capture
+///     std::thread::sleep(frame.saturating_sub(start.elapsed())); // pace the frame
+/// }
+/// # }
+/// ```
+///
+/// While an `EventReader` exists, read input **only** through it — do not also call
+/// [`poll_event`]/[`read_event`], or the two will race for the same events. Dropping it
+/// stops and joins the reader thread.
+pub struct EventReader {
+    rx: Receiver<Event>,
+    stop: Arc<AtomicBool>,
+    handle: Option<JoinHandle<()>>,
+}
+
+impl EventReader {
+    /// Spawn the reader thread.
+    pub fn new() -> Self {
+        let (tx, rx) = mpsc::channel();
+        let stop = Arc::new(AtomicBool::new(false));
+        let thread_stop = Arc::clone(&stop);
+        let handle = thread::spawn(move || {
+            // Poll with a timeout so the thread wakes periodically to observe `stop`;
+            // an event arriving mid-wait is still returned (and forwarded) at once.
+            while !thread_stop.load(Ordering::Relaxed) {
+                match event::poll(Duration::from_millis(100)) {
+                    Ok(true) => match event::read() {
+                        Ok(ev) => {
+                            if tx.send(ev).is_err() {
+                                break; // the receiver was dropped
+                            }
+                        }
+                        Err(_) => break,
+                    },
+                    Ok(false) => {}  // timed out; loop to re-check `stop`
+                    Err(_) => break, // event source closed/unavailable
+                }
+            }
+        });
+        Self { rx, stop, handle: Some(handle) }
+    }
+
+    /// The next captured event, or `None` if none are queued — never blocks.
+    pub fn try_recv(&self) -> Option<Event> {
+        self.rx.try_recv().ok()
+    }
+
+    /// Block up to `timeout` for the next event (e.g. to pace a frame that should
+    /// sleep until input), or `None` if it elapses first.
+    pub fn recv_timeout(&self, timeout: Duration) -> Option<Event> {
+        self.rx.recv_timeout(timeout).ok()
+    }
+
+    /// Drain **all** currently-queued events. Handling every one each frame is what
+    /// keeps input snappy: a burst is consumed in one frame, and high-frequency mouse
+    /// events never starve the keyboard.
+    pub fn drain(&self) -> impl Iterator<Item = Event> + '_ {
+        std::iter::from_fn(|| self.rx.try_recv().ok())
+    }
+}
+
+impl Default for EventReader {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Drop for EventReader {
+    /// Signal the reader thread to stop and join it (within one poll interval).
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(h) = self.handle.take() {
+            let _ = h.join();
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn event_reader_starts_idle_and_stops_cleanly() {
+        // No synthetic events reach the global source in a headless test, so the queue
+        // is empty; the point is that construction, draining, and Drop (which joins the
+        // thread) never block or panic.
+        let reader = EventReader::new();
+        assert!(reader.try_recv().is_none());
+        assert_eq!(reader.drain().count(), 0);
     }
 }
