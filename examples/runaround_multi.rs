@@ -21,7 +21,8 @@ use crossterm::event::{Event, KeyCode, KeyEvent};
 
 use mullion::{
     backend::CrosstermBackend,
-    border::{BorderStyle, Borders, CornerStyle},
+    border::{BorderStyle, CornerStyle},
+    panel::{draw_panel, Panel},
     poll_event,
     runaround::{flow, render_flow},
     style::{Color, Modifier, Style},
@@ -114,18 +115,13 @@ fn render(buf: &mut Buffer, st: &mut State) {
     for (i, &r) in rects.iter().enumerate() {
         let active = i == st.active;
         let color = if active { Color::Cyan } else { Color::DarkGray };
-        // Blank the interior, then frame it.
-        for y in r.y..r.bottom() {
-            for x in r.x..r.right() {
-                buf.set_string(x, y, " ", Style::default());
-            }
-        }
+        // A filled panel blanks the interior and frames it in one step.
         let bstyle = BorderStyle {
             weight: if active { LineWeight::Heavy } else { LineWeight::Light },
             corners: CornerStyle::Rounded,
             style: Style::default().fg(color),
         };
-        mullion::border::draw_box(buf, r, Borders::ALL, &bstyle);
+        draw_panel(buf, r, &Panel::new(bstyle).fill(Style::default()));
         if r.width > 4 && r.height > 1 {
             let label = format!("T{}", i + 1);
             buf.set_string(r.x + 2, r.y + r.height / 2, &label, Style::default().fg(color).add_modifier(Modifier::BOLD));

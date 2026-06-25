@@ -34,7 +34,7 @@ use mullion::{
     poll_event,
     style::{Color, Modifier, Style},
     text::{wrap, BaseDirection, WrappedText},
-    Buffer, LineWeight, Rect, Terminal,
+    visible_window, Buffer, LineWeight, Rect, Terminal,
 };
 
 // ── Sample content ────────────────────────────────────────────────────────────
@@ -101,13 +101,12 @@ fn render(buf: &mut Buffer, st: &mut State) {
 
     let vh = inner.height as usize; // viewport height in lines
     // Keep the cursor in view: pagination snaps to page boundaries; continuous
-    // scrolling nudges the window just far enough.
+    // scrolling nudges the window just far enough (`visible_window` does the
+    // keep-cursor-in-view arithmetic for the scrolling case).
     if st.paginate {
         st.scroll = (st.cur_line / vh.max(1)) * vh.max(1);
-    } else if st.cur_line < st.scroll {
-        st.scroll = st.cur_line;
-    } else if st.cur_line >= st.scroll + vh {
-        st.scroll = st.cur_line + 1 - vh;
+    } else {
+        visible_window(st.cur_line, &mut st.scroll, line_count, vh);
     }
 
     // Box + title.

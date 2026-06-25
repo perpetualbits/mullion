@@ -332,6 +332,18 @@ pub fn frame_tiles(
 /// 3. Every leaf tile's returned content rect is the space inside all surrounding
 ///    borders — the caller does not inset again.
 ///
+/// ## Corners
+///
+/// The frame's [`weight`](BorderStyle::weight) and glyph colour come from `style`,
+/// matching [`draw_box`] and [`frame_tiles`].  When
+/// [`corners`](BorderStyle::corners) is [`CornerStyle::Rounded`] the four **outer
+/// frame corners** are emitted as `╭╮╰╯`; internal divider junctions (tees and
+/// crosses) and any non-`Light` corner are left square, consistent with
+/// [`border_glyphs`]'s "rounded is Light-only" rule.  In a shared-border layout
+/// every divider spans the full frame, so the only pure two-arm Light corners are
+/// the four outer corners — rounding is therefore well-defined and never touches
+/// an interior junction.
+///
 /// ## Overrides
 ///
 /// Each `(TileId, LineWeight)` pair in `overrides` adds that tile's four bordering
@@ -348,6 +360,8 @@ pub fn frame_tiles(
 /// - `buf`: the buffer to paint into; cells are left untouched where no border arm
 ///   is present (i.e. the tile interiors remain blank).
 /// - `root`: mutable so that `Orientation::Adaptive` can record its chosen axis.
+/// - `style`: the frame's [`BorderStyle`] (weight + corners + colour); the same
+///   type [`draw_box`] takes, so the three border entry points are consistent.
 /// - `overrides`: weight overrides keyed by `TileId`; may be empty.
 /// # Returns
 /// Flat list of `(TileId, content_rect)` in depth-first, left-to-right order.
@@ -355,10 +369,10 @@ pub fn render_shared(
     buf: &mut Buffer,
     root: &mut Node,
     area: Rect,
-    weight: LineWeight,
-    style: &Style,
+    style: &BorderStyle,
     overrides: &[(TileId, LineWeight)],
 ) -> Vec<(TileId, Rect)> {
+    let weight = style.weight;
     let mut grid = EdgeGrid::new(area);
 
     // Outer frame: one cell on all four sides.
@@ -378,18 +392,39 @@ pub fn render_shared(
 
     // Resolve every cell in the grid and write glyphs to `buf`.
     // `set_grapheme` silently ignores out-of-bounds positions, so no clip needed.
+    let round = matches!(style.corners, CornerStyle::Rounded);
     let mut tmp = [0u8; 4];
     for y in area.y..area.bottom() {
         for x in area.x..area.right() {
             if let Some(cell) = grid.get(x, y) {
                 if let Some(ch) = resolve_junction(cell) {
-                    buf.set_grapheme(x, y, ch.encode_utf8(&mut tmp), *style);
+                    // Rounding applies only to pure two-arm Light corners — the
+                    // four outer frame corners.  `round_light_corner` is a no-op
+                    // for tees, crosses, lines, stubs, and heavy/double corners.
+                    let ch = if round { round_light_corner(ch) } else { ch };
+                    buf.set_grapheme(x, y, ch.encode_utf8(&mut tmp), style.style);
                 }
             }
         }
     }
 
     tile_info.into_iter().map(|(id, _, content)| (id, content)).collect()
+}
+
+/// Map a square **Light** corner glyph to its rounded variant; pass everything
+/// else through unchanged.
+///
+/// Only `┌ ┐ └ ┘` have curved forms (`╭ ╮ ╰ ╯`).  Heavy/double corners, tees,
+/// crosses, lines, and stubs have no rounded variant and are returned as-is —
+/// the same "rounded is Light-only, else fall back" rule [`border_glyphs`] uses.
+fn round_light_corner(ch: char) -> char {
+    match ch {
+        '┌' => '╭',
+        '┐' => '╮',
+        '└' => '╰',
+        '┘' => '╯',
+        other => other,
+    }
 }
 
 /// Recursively add internal divider lines to `grid` and collect tile metadata.
@@ -627,6 +662,51 @@ impl BorderGap {
     }
 }
 
+// ── render_rim ──────────────────────────────────────────────────────────────────
+
+/// Re-style the perimeter cells of `rect` from a caller-owned policy — a stateless
+/// rim pass for travelling-glow border animations.
+///
+/// Walks the discrete border cells clockwise via [`Rect::border_cells`].  For each
+/// cell it computes the normalised perimeter position [`Rect::border_pos`] and hands
+/// it, together with the cell's **current** [`Style`], to `style_at`.  When the
+/// closure returns `Some(new)` the cell's glyph is preserved and re-drawn in `new`;
+/// `None` leaves the cell untouched.  Easing, colour, and phase therefore all stay
+/// in the caller — mullion contributes only the walk and the `border_pos` lookup,
+/// so the engine stays content-agnostic.
+///
+/// Cells inside a [`BorderGap`] whose [`rim_glow`](BorderGap::rim_glow) is `false`
+/// are **skipped**, so a gap that paints its own colours in a later pass is never
+/// overwritten by the animation.  Gaps with `rim_glow == true` are walked like any
+/// other border cell.
+///
+/// This is a no-op for rects smaller than 2×2 (no distinct perimeter) and never
+/// panics.  Call it after the structural border pass and before the gap-content
+/// pass (the three-pass pattern documented on [`BorderGap`]).
+pub fn render_rim(
+    buf: &mut Buffer,
+    rect: Rect,
+    gaps: &[BorderGap],
+    style_at: impl Fn(f32, Style) -> Option<Style>,
+) {
+    for (x, y) in rect.border_cells() {
+        // Skip cells owned by a non-glow gap: they render themselves later.
+        if gaps.iter().any(|g| !g.rim_glow && g.contains(x, y)) {
+            continue;
+        }
+        if !buf.area.contains(x, y) {
+            continue;
+        }
+        let pos = rect.border_pos(x, y);
+        let current = buf.get(x, y).style;
+        if let Some(new_style) = style_at(pos, current) {
+            // Preserve the existing glyph; only the style changes.
+            let symbol = buf.get(x, y).symbol.clone();
+            buf.set_grapheme(x, y, &symbol, new_style);
+        }
+    }
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -667,5 +747,49 @@ mod tests {
             ("═", "║", "╔", "╗", "╚", "╝"),
             "Rounded+Double must fall back to square double corners"
         );
+    }
+
+    #[test]
+    fn round_light_corner_only_touches_light_corners() {
+        assert_eq!(round_light_corner('┌'), '╭');
+        assert_eq!(round_light_corner('┘'), '╯');
+        // Tees, crosses, heavy/double corners, and lines pass through unchanged.
+        for ch in ['┼', '├', '┬', '┏', '╔', '─', '│', '╶'] {
+            assert_eq!(round_light_corner(ch), ch, "{ch} must not round");
+        }
+    }
+
+    #[test]
+    fn render_rim_recolors_border_and_skips_nonglow_gaps() {
+        use crate::style::Color;
+
+        let area = Rect::new(0, 0, 6, 4);
+        let style = BorderStyle {
+            weight: LineWeight::Light,
+            corners: CornerStyle::Square,
+            style: Style::default(),
+        };
+
+        // A non-glow gap over one top-edge cell, and a glow gap over another.
+        let quiet = BorderGap::new(Rect::new(2, 0, 1, 1));
+        let glow = BorderGap::new(Rect::new(3, 0, 1, 1)).with_rim_glow();
+        let gaps = [quiet, glow];
+
+        let mut buf = Buffer::empty(area);
+        draw_box(&mut buf, area, Borders::ALL, &style);
+        let quiet_before = buf.get(2, 0).style;
+
+        render_rim(&mut buf, area, &gaps, |_pos, cur| Some(cur.fg(Color::Red)));
+
+        // Ordinary border cells are recoloured but keep their glyph.
+        assert_eq!(buf.get(0, 0).symbol, "┌", "glyph preserved");
+        assert_eq!(buf.get(0, 0).style.fg, Color::Red);
+        assert_eq!(buf.get(1, 0).style.fg, Color::Red);
+        // The non-glow gap cell is left exactly as it was.
+        assert_eq!(buf.get(2, 0).style, quiet_before, "non-glow gap skipped");
+        // The glow gap cell IS walked and recoloured.
+        assert_eq!(buf.get(3, 0).style.fg, Color::Red, "glow gap recoloured");
+        // Interior cells are never on the perimeter walk.
+        assert_eq!(buf.get(2, 2).style.fg, quiet_before.fg, "interior untouched");
     }
 }

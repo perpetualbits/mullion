@@ -82,34 +82,9 @@ impl Field {
     /// not repeat the start), so a caller that wants to wrap takes the column index
     /// modulo [`width`](Field::width).
     pub fn perimeter(area: Rect) -> Self {
-        let mut cells = Vec::new();
-        if area.width == 0 || area.height == 0 {
-            return Self::strip(cells);
-        }
-        let (x0, y0) = (area.x, area.y);
-        let (x1, y1) = (area.right() - 1, area.bottom() - 1); // inclusive far corners
-        if area.width == 1 || area.height == 1 {
-            // Degenerate: a single row or column has no corners — just its cells.
-            for y in y0..=y1 {
-                for x in x0..=x1 {
-                    cells.push((x, y));
-                }
-            }
-            return Self::strip(cells);
-        }
-        for x in x0..=x1 {
-            cells.push((x, y0)); // top edge, left → right
-        }
-        for y in (y0 + 1)..=y1 {
-            cells.push((x1, y)); // right edge, top → bottom
-        }
-        for x in (x0..x1).rev() {
-            cells.push((x, y1)); // bottom edge, right → left
-        }
-        for y in ((y0 + 1)..y1).rev() {
-            cells.push((x0, y)); // left edge, bottom → top
-        }
-        Self::strip(cells)
+        // The clockwise corner-crossing walk is exactly [`Rect::border_cells`]; a
+        // strip over it gives a 1-row field that turns at the corners.
+        Self::strip(area.border_cells().collect())
     }
 
     /// Logical width (columns).

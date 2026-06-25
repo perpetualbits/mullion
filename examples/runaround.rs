@@ -23,7 +23,8 @@ use crossterm::event::{Event, KeyCode, KeyEvent};
 
 use mullion::{
     backend::CrosstermBackend,
-    border::{BorderStyle, Borders, CornerStyle},
+    border::{BorderStyle, CornerStyle},
+    panel::{draw_panel, Panel},
     poll_event,
     runaround::flow,
     style::{Color, Modifier, Style},
@@ -89,19 +90,14 @@ fn render(buf: &mut Buffer, st: &mut State) {
     let placed = flow(TEXT, parent, &[figure], st.gutter, st.base(), parent.y..parent.bottom());
     mullion::runaround::render_flow(buf, &placed, Style::default().fg(Color::White));
 
-    // Draw the figure on top so it reads as a solid obstacle.
+    // Draw the figure on top so it reads as a solid obstacle: a filled panel
+    // clears the interior (the flow never wrote there, but be safe) and frames it.
     let bstyle = BorderStyle {
         weight: LineWeight::Heavy,
         corners: CornerStyle::Rounded,
         style: Style::default().fg(Color::Cyan),
     };
-    // Blank the figure interior first (the flow never wrote there, but be safe).
-    for y in figure.y..figure.bottom() {
-        for x in figure.x..figure.right() {
-            buf.set_string(x, y, " ", Style::default());
-        }
-    }
-    mullion::border::draw_box(buf, figure, Borders::ALL, &bstyle);
+    draw_panel(buf, figure, &Panel::new(bstyle).fill(Style::default()));
     if figure.width > 8 && figure.height > 1 {
         buf.set_string(
             figure.x + 2,

@@ -141,8 +141,12 @@ fn render_header(buf: &mut Buffer, area: Rect, frame: u64) {
             (Constraint::new(Size::Fill(1)), Node::Tile(HDR_BASE + 2)),
         ],
     };
-    let bdr_st = Style::default().fg(Color::DarkGray);
-    let crects = render_shared(buf, &mut node, area, LineWeight::Light, &bdr_st, &[]);
+    let bdr_st = BorderStyle {
+        weight: LineWeight::Light,
+        corners: CornerStyle::Rounded,
+        style: Style::default().fg(Color::DarkGray),
+    };
+    let crects = render_shared(buf, &mut node, area, &bdr_st, &[]);
 
     // Static summary content for each header tile.
     const SUMMARIES: [(&str, &str, Color); 3] = [

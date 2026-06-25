@@ -36,6 +36,14 @@ pub struct Theme {
     pub accent: Style,
     /// Background highlight for selected items.
     pub selection: Style,
+    /// Emphasised text for headings/titles, distinct from body [`text`](Theme::text).
+    pub heading: Style,
+    /// Success / healthy / "OK" status (bind succeeded, write committed).
+    pub ok: Style,
+    /// Warning / caution status (nearing a limit, unsaved changes).
+    pub warn: Style,
+    /// Error / failure status (write failed, validation error, mismatch).
+    pub error: Style,
 }
 
 impl Theme {
@@ -71,6 +79,12 @@ impl Theme {
             text_dim:       Style::default().fg(Color::DarkGray),
             accent:         Style::default().fg(Color::Blue),
             selection:      Style::default().fg(Color::White).bg(Color::Blue),
+            heading:        Style::default().fg(Color::Black).add_modifier(Modifier::BOLD),
+            // On a light background, light-* variants wash out: use the saturated
+            // base colours (and a dark goldenrod for warn) so status stays legible.
+            ok:             Style::default().fg(Color::Green),
+            warn:           Style::default().fg(Color::Rgb(0xB8, 0x86, 0x0B)),
+            error:          Style::default().fg(Color::Red),
         }
     }
 }
@@ -88,6 +102,11 @@ impl Default for Theme {
             text_dim:       Style::default().fg(Color::DarkGray),
             accent:         Style::default().fg(Color::LightCyan),
             selection:      Style::default().fg(Color::Black).bg(Color::LightCyan),
+            heading:        Style::default().add_modifier(Modifier::BOLD),
+            // On a dark background the bright light-* variants read best for status.
+            ok:             Style::default().fg(Color::LightGreen),
+            warn:           Style::default().fg(Color::LightYellow),
+            error:          Style::default().fg(Color::LightRed),
         }
     }
 }
@@ -131,5 +150,17 @@ mod tests {
     fn focused_and_unfocused_border_styles_differ() {
         let theme = Theme::default();
         assert_ne!(theme.border_style(false).style, theme.border_style(true).style);
+    }
+
+    #[test]
+    fn status_roles_are_distinct_in_both_palettes() {
+        for theme in [Theme::default(), Theme::light()] {
+            // The three status roles must be mutually distinct so success/warning/
+            // error are never confusable, and a heading must read apart from body.
+            assert_ne!(theme.ok, theme.error);
+            assert_ne!(theme.ok, theme.warn);
+            assert_ne!(theme.warn, theme.error);
+            assert_ne!(theme.heading, theme.text);
+        }
     }
 }

@@ -692,7 +692,7 @@ mod tests {
                 }),
             ],
         };
-        render_shared(&mut buf, &mut root, area, LineWeight::Light, &Style::default(), &[]);
+        render_shared(&mut buf, &mut root, area, &light_box_style(), &[]);
 
         // Verify the ┼ is where expected before the label pass.
         assert_eq!(buf.get(6, 3).symbol, "┼", "┼ must be present after render_shared");

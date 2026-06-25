@@ -190,7 +190,7 @@ fn render_shared_two_tiles_h() {
     let mut term = Terminal::new(TestBackend::new(7, 3)).unwrap();
     let mut node = two_h_tiles();
     term.draw(|buf| {
-        render_shared(buf, &mut node, Rect::new(0, 0, 7, 3), LineWeight::Light, &Style::default(), &[]);
+        render_shared(buf, &mut node, Rect::new(0, 0, 7, 3), &light(), &[]);
     }).unwrap();
     assert_backend_snapshot!(term, "┌──┬──┐\n│  │  │\n└──┴──┘");
 }
@@ -219,10 +219,42 @@ fn render_shared_2x2_grid() {
         ],
     };
     term.draw(|buf| {
-        render_shared(buf, &mut node, Rect::new(0, 0, 7, 5), LineWeight::Light, &Style::default(), &[]);
+        render_shared(buf, &mut node, Rect::new(0, 0, 7, 5), &light(), &[]);
     }).unwrap();
     assert_backend_snapshot!(term,
         "┌──┬──┐\n│  │  │\n├──┼──┤\n│  │  │\n└──┴──┘"
+    );
+}
+
+/// Rounded outer corners on the 2×2 grid: only the four frame corners curve;
+/// every internal junction (├ ┤ ┬ ┴ ┼) stays square.
+#[test]
+fn render_shared_2x2_grid_rounded() {
+    let mut term = Terminal::new(TestBackend::new(7, 5)).unwrap();
+    let mut node = Node::Split {
+        orientation: Orientation::Vertical,
+        children: vec![
+            (Constraint::new(Size::Fill(1)), Node::Split {
+                orientation: Orientation::Horizontal,
+                children: vec![
+                    (Constraint::new(Size::Fill(1)), Node::Tile(0)),
+                    (Constraint::new(Size::Fill(1)), Node::Tile(1)),
+                ],
+            }),
+            (Constraint::new(Size::Fill(1)), Node::Split {
+                orientation: Orientation::Horizontal,
+                children: vec![
+                    (Constraint::new(Size::Fill(1)), Node::Tile(2)),
+                    (Constraint::new(Size::Fill(1)), Node::Tile(3)),
+                ],
+            }),
+        ],
+    };
+    term.draw(|buf| {
+        render_shared(buf, &mut node, Rect::new(0, 0, 7, 5), &rounded(), &[]);
+    }).unwrap();
+    assert_backend_snapshot!(term,
+        "╭──┬──╮\n│  │  │\n├──┼──┤\n│  │  │\n╰──┴──╯"
     );
 }
 
@@ -238,7 +270,7 @@ fn render_shared_two_tiles_v() {
         ],
     };
     term.draw(|buf| {
-        render_shared(buf, &mut node, Rect::new(0, 0, 7, 5), LineWeight::Light, &Style::default(), &[]);
+        render_shared(buf, &mut node, Rect::new(0, 0, 7, 5), &light(), &[]);
     }).unwrap();
     assert_backend_snapshot!(term,
         "┌─────┐\n│     │\n├─────┤\n│     │\n└─────┘"
@@ -265,7 +297,7 @@ fn render_shared_nested_split() {
         ],
     };
     term.draw(|buf| {
-        render_shared(buf, &mut node, Rect::new(0, 0, 7, 5), LineWeight::Light, &Style::default(), &[]);
+        render_shared(buf, &mut node, Rect::new(0, 0, 7, 5), &light(), &[]);
     }).unwrap();
     // The divider at y=2 goes only from x=0..3 (left child's column span),
     // so (3,2) is ┤ not ┼, and (4,2)..(5,2) are spaces.
@@ -283,7 +315,7 @@ fn render_shared_content_rects() {
     let mut buf = Buffer::empty(Rect::new(0, 0, 7, 3));
     let rects = render_shared(
         &mut buf, &mut node, Rect::new(0, 0, 7, 3),
-        LineWeight::Light, &Style::default(), &[],
+        &light(), &[],
     );
     assert_eq!(rects.len(), 2);
     assert_eq!(rects[0], (0, Rect::new(1, 1, 2, 1)));
@@ -303,7 +335,7 @@ fn render_shared_override_heavy_left() {
     term.draw(|buf| {
         render_shared(
             buf, &mut node, Rect::new(0, 0, 7, 3),
-            LineWeight::Light, &Style::default(),
+            &light(),
             &[(0, LineWeight::Heavy)],
         );
     }).unwrap();
@@ -321,7 +353,7 @@ fn render_shared_degenerate_1x1() {
     let mut buf = Buffer::empty(Rect::new(0, 0, 1, 1));
     let rects = render_shared(
         &mut buf, &mut node, Rect::new(0, 0, 1, 1),
-        LineWeight::Light, &Style::default(), &[],
+        &light(), &[],
     );
     assert_eq!(rects.len(), 1);
     assert!(rects[0].1.is_empty(), "1×1 must yield zero-area content rect");
@@ -334,7 +366,7 @@ fn render_shared_degenerate_2x2() {
     let mut buf = Buffer::empty(Rect::new(0, 0, 2, 2));
     let rects = render_shared(
         &mut buf, &mut node, Rect::new(0, 0, 2, 2),
-        LineWeight::Light, &Style::default(), &[],
+        &light(), &[],
     );
     assert_eq!(rects.len(), 1);
     assert!(rects[0].1.is_empty(), "2×2 must yield zero-area content rect");
@@ -351,7 +383,7 @@ fn render_shared_degenerate_5_children_6_wide() {
     let mut buf = Buffer::empty(Rect::new(0, 0, 6, 3));
     let rects = render_shared(
         &mut buf, &mut node, Rect::new(0, 0, 6, 3),
-        LineWeight::Light, &Style::default(), &[],
+        &light(), &[],
     );
     assert_eq!(rects.len(), 5, "all 5 tiles must be returned");
     // No panic is the primary assertion; all content rects may be zero-area.

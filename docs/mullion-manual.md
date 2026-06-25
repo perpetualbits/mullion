@@ -123,14 +123,18 @@ Two modes:
 - **Per-tile** — `frame_tiles(buf, &rects, borders, &style)` boxes each tile and
   returns its interior content rect (adjacent tiles show a doubled gutter, by
   design). `draw_box` is the primitive.
-- **Shared** — `render_shared(buf, &mut root, area, weight, &style, &overrides)`
+- **Shared** — `render_shared(buf, &mut root, area, &border_style, &overrides)`
   draws one outer frame and single-line dividers with correct `├ ┤ ┬ ┴ ┼`
   junctions (including mixed light/heavy), returning content rects.
 
-`LineWeight` is `Light`/`Heavy`/`Double`; `CornerStyle` is `Square`/`Rounded`
-(rounded is light-only). `overrides: &[(TileId, LineWeight)]` draws chosen tiles
-heavier — used for the focus highlight (§3.4). `focus_override(&tree, weight)`
-builds that slice from the current focus.
+All three border entry points take the same `&BorderStyle` (weight + corners +
+colour). `LineWeight` is `Light`/`Heavy`/`Double`; `CornerStyle` is
+`Square`/`Rounded` (rounded is light-only). In shared-border mode `Rounded` curves
+the **four outer frame corners** to `╭╮╰╯` and leaves every internal junction
+square — every divider spans the full frame, so the only bare Light corners are the
+outer four. `overrides: &[(TileId, LineWeight)]` draws chosen tiles heavier — used
+for the focus highlight (§3.4). `focus_override(&tree, weight)` builds that slice
+from the current focus.
 
 ### 3.4 Focus and input
 
@@ -413,7 +417,7 @@ click as *enter* is the app's call (it can `zoom_to` after seeing `Focused`).
 
 #### Theme
 
-`Theme` groups six named `Style` roles so the whole interface can be recolored by
+`Theme` groups ten named `Style` roles so the whole interface can be recolored by
 swapping one value:
 
 | Role | Purpose |
@@ -424,6 +428,14 @@ swapping one value:
 | `text_dim` | Secondary text (labels, hints) |
 | `accent` | Gauges, marquees, selected controls |
 | `selection` | Selected-item highlight background |
+| `heading` | Emphasised headings/titles, distinct from `text` |
+| `ok` | Success / healthy status (bind OK, write committed) |
+| `warn` | Warning / caution status (nearing a limit, unsaved) |
+| `error` | Error / failure status (write failed, validation error) |
+
+The status roles (`ok`/`warn`/`error`) and `heading` let status-heavy admin tools
+drop their bespoke palettes; the built-in palettes pick legible colours per
+background (bright `light_*` on dark, saturated bases on light).
 
 Two built-in palettes: `Theme::default()` (dark, cyan accent) and `Theme::light()`
 (black text, blue accent).  `theme.border_style(focused)` returns a ready-to-use
@@ -491,18 +503,28 @@ let weight = (1.0 + smoothstep(t) * 399.0) as u16; // 1 → 400
 
 The layout solver then grows that tile continuously each frame — no jump.
 
-#### `Rect::border_pos` and `Rect::border_len`
+#### `Rect::border_pos`, `Rect::border_len`, and `Rect::border_cells`
 
 ```rust
 let r = Rect::new(x, y, w, h);
-let s: f32 = r.border_pos(cx, cy); // 0.0 .. <1.0, clockwise from top-left
-let p: u32 = r.border_len();        // total border cells = 2*(w+h)-4
+let s: f32 = r.border_pos(cx, cy);  // 0.0 .. <1.0, clockwise from top-left
+let p: u32 = r.border_len();         // total border cells = 2*(w+h)-4
+for (x, y) in r.border_cells() { /* clockwise ring, no duplicates */ }
 ```
 
 `border_pos` maps a cell coordinate to its normalised position on the closed
 clockwise perimeter of the rectangle (top edge → right edge → bottom edge →
 left edge, each corner counted once).  Interior cells and cells outside the
 rect return 0.0.
+
+`border_cells` is the discrete companion: it *enumerates* the perimeter cells in
+exactly that walk order (no hand-rolled top→right→bottom→left loop with
+de-duplicated corners), so the canonical travelling glow is just
+`for (x, y) in rect.border_cells() { let s = rect.border_pos(x, y); … }`. Its
+yielded count equals `border_len`; degenerate (1×N / N×1) rects yield their
+straight run. `render_rim(buf, rect, gaps, |pos, cur| …)` packages the loop: it
+walks the cells, skips non-glow `BorderGap`s, and re-styles each cell from a
+caller closure (easing/colour stay app-owned).
 
 The primary use case is animating box borders.  Combine with `ease::gaussian`
 to apply a colour bump that travels around the entire rectangle without any
@@ -766,6 +788,55 @@ reads it as per-row **slots** and the future connector router reads it as free
 **cells**. Because both derive from the same geometry, runaround text and routing
 can never disagree about where the obstacles are. The gutter (clearance kept
 around each float) is a per-query parameter. Demo: `cargo run --example floating`.
+
+### 3.15.1 Dialog chrome, fields & windowing — `mullion::panel` / `mullion::edit`
+
+These are **stateless primitives** for the boilerplate admin/CRUD TUIs repeat —
+modal chrome, single-line editing, and keep-cursor-in-view scrolling. None hold
+state or trap focus (no widgets, per the roadmap): the app still owns every
+`String`, cursor, scroll offset, and the form itself; mullion contributes
+composition, grapheme/width correctness, and a render pass.
+
+**Panel chrome.** `draw_panel(buf, area, &panel)` clears the interior, frames it,
+draws a centred title/footer over the border, and returns the **interior** rect to
+paint into — pairing directly with `FloatLayer::solve`:
+
+```rust
+use mullion::{draw_panel, Panel, BorderStyle, CornerStyle, LineWeight, Style};
+
+let panel = Panel::new(BorderStyle { weight: LineWeight::Light,
+                                     corners: CornerStyle::Rounded,
+                                     style: theme.border })
+    .fill(theme.text)          // clear interior to an opaque background (None = leave)
+    .title("Edit user")
+    .footer("Enter save · Esc cancel");
+let interior = draw_panel(buf, dialog_rect, &panel); // paint the form into `interior`
+```
+
+**Line editing.** `line_edit(&mut text, &mut cursor, key) -> bool` is a pure
+key→edit transform over caller-owned state (`cursor` is a byte index kept on a
+grapheme boundary); it handles insert, Backspace/Delete, Left/Right/Home/End,
+grapheme-correctly, and returns `false` for an unhandled key or an edge no-op so a
+form can re-route it (Tab to the next field, arrow-at-edge to move focus).
+`render_field(buf, rect, &text, cursor, &mut scroll, &opts)` draws one line with
+horizontal scroll-to-cursor and optional masking (`FieldRender { style,
+cursor_style, mask }` — `mask: Some('•')` for passwords):
+
+```rust
+use mullion::{line_edit, render_field, FieldRender};
+
+// in the key handler — the app owns `text`, `cursor`, `scroll`:
+if !line_edit(&mut field.text, &mut field.cursor, key) { /* fell through; route it */ }
+
+// in the render pass:
+render_field(buf, field_rect, &field.text, field.cursor, &mut field.scroll,
+             &FieldRender { style: theme.text, cursor_style: theme.selection, mask: None });
+```
+
+**List windowing.** `visible_window(cursor, &mut offset, len, viewport) ->
+Range<usize>` is the keep-cursor-in-view arithmetic every list screen and the field
+renderer share: the app keeps the cursor and offset, mullion slides the offset the
+minimum needed and clamps it so the window never scrolls past the end.
 
 ### 3.16 Text engine — `mullion::text`
 
@@ -1383,7 +1454,10 @@ never decodes video itself).
 | `tree` | `Tree`, `Dir`, `Direction`, `tile_id_of`, `node_id`, `id_from_key`, `leaves`, `focus_path`, `focus_override`, `node_by_id`/`node_by_id_mut`, `reconcile_carousel`, `reconcile_split` |
 | `layout` (module) | `solve`, `region_of`, `carousel_visible_range`, `min_size` |
 | `render` | `render_carousel` |
-| `border` | `draw_box`, `frame_tiles`, `render_shared`, `BorderStyle`, `Borders`, `LineWeight`, `CornerStyle`, `BorderGap` |
+| `border` | `draw_box`, `frame_tiles`, `render_shared`, `render_rim`, `BorderStyle`, `Borders`, `LineWeight`, `CornerStyle`, `BorderGap` |
+| `geometry` | `Rect` (`border_pos`, `border_len`, `border_cells`, `intersection`, `contains`, …), `visible_window` |
+| `panel` | `Panel` (`new`, `fill`, `title`, `footer`), `draw_panel` |
+| `edit` | `line_edit`, `render_field`, `FieldRender` |
 | `table` | `ColumnGrid` (`resolve`, `row_rects`, `write_text`, `write_number`, `write_bar`), `ColumnDef`, `ColumnKind`, `Table` (`new`, `body_area`, `render`) |
 | `float` | `FloatLayer` (`with_child`, `solve`), `FloatChild`, `FloatRect`, `FreeInterval`, `free_intervals_in_rows`, `free_cells_in_window` |
 | `graph` | `GraphCanvas` (`new`, `with_grid`, `resize`, `add`, `remove`, `place`, `nodes`, `move_to`, `nudge`, `snap_to_grid`, `solve`), `Viewport` (`pan_by`, `set_pan`, `visible`, `project`, `is_visible`, `v_metrics`/`h_metrics`) |
@@ -1423,7 +1497,8 @@ Common re-exports at the crate root: `Buffer`, `Cell`, `Node`, `Constraint`,
 `LodScale`, `Zoom`, `lerp_rect`, `FocusTarget`, `auto_layout`, `assign_layers`,
 `order_layers`, `crossings`, `SugiyamaParams`, `LayerDir`, `Field`, `BLOCK_RAMP`,
 `ASCII_RAMP`, `score`, `refine`, `anneal`, `AnnealParams`, `LayoutScore`,
-`ScoreWeights`, `Preference`, `learn_weights`.
+`ScoreWeights`, `Preference`, `learn_weights`, `render_rim`, `visible_window`,
+`Panel`, `draw_panel`, `line_edit`, `render_field`, `FieldRender`.
 Module-scoped:
 `Axis`, `region_of`, `carousel_visible_range`, `solve` (`layout`);
 `Dir`/`Direction` (`tree`).

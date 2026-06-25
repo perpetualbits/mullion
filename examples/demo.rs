@@ -39,7 +39,7 @@ use mullion::{
     layout::{Constraint, Node, Orientation, Size, TileId},
     poll_event,
     style::{Color, Modifier, Style},
-    Buffer, LineWeight, Rect, Terminal, Tree,
+    Buffer, BorderStyle, CornerStyle, LineWeight, Rect, Terminal, Tree,
 };
 
 // ── Tile metadata ─────────────────────────────────────────────────────────────
@@ -108,14 +108,17 @@ fn render(buf: &mut Buffer, tree: &mut Tree) {
     // Focus highlight: draw the focused tile's borders at Heavy weight so they
     // stand out against the Light-weight dividers of their neighbours.
     let overrides = focus_override(tree, LineWeight::Heavy);
-    let border_style = Style::default().fg(Color::DarkGray);
+    let border_style = BorderStyle {
+        weight: LineWeight::Light,
+        corners: CornerStyle::Rounded,
+        style: Style::default().fg(Color::DarkGray),
+    };
 
     // Paint all borders and collect the content rect for every visible leaf.
     let rects = render_shared(
         buf,
         tree.effective_root_mut(),
         render_area,
-        LineWeight::Light,
         &border_style,
         &overrides,
     );
