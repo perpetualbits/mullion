@@ -12,7 +12,7 @@
 //! feeds its frames to the widget — mullion never decodes video itself.
 //!
 //! Keys
-//!   e              encoding: braille → half-block → luma-chroma
+//!   e              encoding: braille → half-block → luma-chroma → sextant
 //!   d              dither: Bayer (ordered) ↔ Floyd–Steinberg (error diffusion)
 //!   n              sampling: bilinear ↔ nearest
 //!   c              colour depth: truecolor → 256 → 16 (fewer output bytes, lower fidelity)
@@ -203,7 +203,7 @@ fn render(buf: &mut Buffer, st: &State, frame: &Frame, source: &str) {
     let active: Vec<&str> = (0..6).filter(|&i| st.filters[i]).map(|i| FILTER_NAMES[i]).collect();
     let status = format!(" source: {}   encoding: {}   dither: {}   sampling: {}   colour: {}   filters: {}",
         source,
-        match st.encoding { Encoding::Braille => "braille", Encoding::HalfBlock => "half-block", Encoding::LumaChroma => "luma-chroma" },
+        match st.encoding { Encoding::Braille => "braille", Encoding::HalfBlock => "half-block", Encoding::LumaChroma => "luma-chroma", Encoding::Sextant => "sextant" },
         match st.dither { Dither::Bayer => "bayer", Dither::FloydSteinberg => "floyd-steinberg" },
         match st.sampling { Sampling::Bilinear => "bilinear", Sampling::Nearest => "nearest" },
         match st.depth { ColorDepth::TrueColor => "truecolor", ColorDepth::Palette256 => "256", ColorDepth::Palette16 => "16" },
@@ -252,7 +252,8 @@ fn run(term: &mut Terminal<CrosstermBackend<io::Stdout>>, mut source: Source) ->
                         st.encoding = match st.encoding {
                             Encoding::Braille => Encoding::HalfBlock,
                             Encoding::HalfBlock => Encoding::LumaChroma,
-                            Encoding::LumaChroma => Encoding::Braille,
+                            Encoding::LumaChroma => Encoding::Sextant,
+                            Encoding::Sextant => Encoding::Braille,
                         };
                     }
                     KeyCode::Char('d') => {
