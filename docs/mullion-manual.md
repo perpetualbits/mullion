@@ -1317,7 +1317,7 @@ its hues — never decoration.
 You supply pixels (the widget does **not** decode video): a **`Frame`** — a `W×H`
 RGB/luma buffer, e.g. straight from `ffmpeg … -pix_fmt gray -f rawvideo` — which it
 samples **bilinearly**, so one frame resamples to any window size; or a
-`sample(u, v) -> Rgb` closure for a live source. Two cell **`Encoding`**s trade detail
+`sample(u, v) -> Rgb` closure for a live source. The cell **`Encoding`**s trade detail
 against colour resolution:
 
 - **`Braille`** — 2×4 dithered luminance sub-pixels tinted by the cell's average
@@ -1329,6 +1329,13 @@ against colour resolution:
   high-acuity channel) while the cell background fills with the hue — dark areas carry
   colour instead of black. Brighter and more detailed than `Braille`, at ≈2× the output
   bytes (it sets a background per cell).
+- **`Sextant`** — 2×3 solid sub-blocks split into **two colours**: the sub-blocks above
+  the cell's mean luminance become the foreground glyph (a Unicode sextant), the rest its
+  background. Where the others tint a *fixed* dot pattern with one average colour, here
+  the *shape* follows the picture — each cell is the two-tone block that best matches its
+  pixels — so it lands much closer to the source. The detail-vs-colour sweet spot, at ≈2×
+  the output bytes (a background per cell). Needs a font with the Unicode 13 sextant
+  glyphs (`U+1FB00…`), which most modern terminal fonts have.
 
 For braille, a **`Dither`** chooses how sub-pixels are quantised: `Bayer` (ordered —
 cheap and **temporally stable**, but a regular cross-hatch in flat areas) or
@@ -1372,7 +1379,7 @@ never decodes video itself).
 | `ease` | `smoothstep`, `lerp`, `gaussian` |
 | `field` | `Field` (`rect`, `strip`, `perimeter`, `paint`, `render_braille`/`_xy`, `render_ramp`/`_xy`, `render_glyphs`/`_xy`), `BLOCK_RAMP`, `ASCII_RAMP` |
 | `colorfield` | `Flame` (`new`, `seeded`, `step`, `at`), `Reaction` (`new`, `seeded`, `step`, `at`, `SPOTS`/`MITOSIS`/`MAZE`/`CORAL`), `Wave` (`plasma`, `flag`, `value`), `Palette` (`Fire`/`Ice`/`Rainbow`, `color`) |
-| `video` | `Video` (`new`, `encoding`, `dither`, `sampling`, `filter`, `render_frame`, `render`), `Frame` (`from_rgb`, `from_luma`, `sample`), `Encoding` (`Braille`/`HalfBlock`/`LumaChroma`), `Dither` (`Bayer`/`FloydSteinberg`), `Sampling` (`Bilinear`/`Nearest`), `Filter` (`Scanlines`/`Vignette`/`Phosphor`/`Gamma`/`Saturation`/`Grayscale`), `Rgb` |
+| `video` | `Video` (`new`, `encoding`, `dither`, `sampling`, `filter`, `render_frame`, `render`), `Frame` (`from_rgb`, `from_luma`, `sample`), `Encoding` (`Braille`/`HalfBlock`/`LumaChroma`/`Sextant`), `Dither` (`Bayer`/`FloydSteinberg`), `Sampling` (`Bilinear`/`Nearest`), `Filter` (`Scanlines`/`Vignette`/`Phosphor`/`Gamma`/`Saturation`/`Grayscale`), `Rgb` |
 | `theme` | `Theme` (`default`, `light`, `border_style`) |
 | `capabilities` | `Capabilities` (`detect`, `full`, `from_env`) |
 | `charset` | `box_to_ascii` |
@@ -1847,7 +1854,7 @@ cargo run --example colorfield
 
 **`examples/tv.rs`** — the §3.28 `Video` widget: a synthesised colour-bar signal (or
 **real footage** via `cargo run --example tv -- clip.mp4`, decoded by `ffmpeg`),
-reproduced faithfully in truecolour, with `e` to cycle braille/half-block/luma-chroma
+reproduced faithfully in truecolour, with `e` to cycle braille/half-block/luma-chroma/sextant
 encoding, `d` to switch Bayer/Floyd–Steinberg dither, `n` to switch bilinear/nearest
 sampling,
 `c` to drop colour depth (truecolor → 256 → 16 — fewer output bytes on a huge,

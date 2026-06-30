@@ -106,6 +106,18 @@ pub enum Encoding {
     /// and more detailed than [`Braille`](Encoding::Braille), at the cost of a per-cell
     /// background colour (≈2× the output bytes, like [`HalfBlock`](Encoding::HalfBlock)).
     LumaChroma,
+    /// 2×3 solid sub-blocks split into **two colours** — the sub-blocks brighter than the
+    /// cell's mean luminance become the foreground glyph (a Unicode *sextant*), the rest
+    /// its background. Full colour at 2×3 sub-pixels per cell: the detail-vs-colour sweet
+    /// spot, far closer to the source than one colour per cell. Where [`Braille`] and
+    /// [`LumaChroma`] tint a *fixed* dot pattern with the average colour,
+    /// [`Sextant`](Encoding::Sextant) lets the *shape* follow the picture — each cell is
+    /// the two-tone block that best matches its pixels. Costs a per-cell background colour
+    /// (≈2× the output bytes, like [`HalfBlock`](Encoding::HalfBlock)).
+    ///
+    /// [`Braille`]: Encoding::Braille
+    /// [`LumaChroma`]: Encoding::LumaChroma
+    Sextant,
 }
 
 /// How [`Encoding::Braille`] decides which sub-pixels light — the dither.
@@ -251,6 +263,11 @@ impl Video {
                 let s = FrameSampler::new(frame, gw, gh, self.sampling);
                 self.render_half_block(buf, area, gh, &compiled, |gx, gy| s.at(gx, gy));
             }
+            Encoding::Sextant => {
+                let (gw, gh) = (area.width as usize * 2, area.height as usize * 3);
+                let s = FrameSampler::new(frame, gw, gh, self.sampling);
+                self.render_sextant(buf, area, gw, gh, &compiled, |gx, gy| s.at(gx, gy));
+            }
         }
     }
 
@@ -273,6 +290,13 @@ impl Video {
                 let (gw, gh) = (area.width as usize, area.height as usize * 2);
                 let (sw, sh) = (gw as f32, gh as f32);
                 self.render_half_block(buf, area, gh, &compiled, |gx, gy| {
+                    sample((gx as f32 + 0.5) / sw, (gy as f32 + 0.5) / sh)
+                });
+            }
+            Encoding::Sextant => {
+                let (gw, gh) = (area.width as usize * 2, area.height as usize * 3);
+                let (sw, sh) = (gw as f32, gh as f32);
+                self.render_sextant(buf, area, gw, gh, &compiled, |gx, gy| {
                     sample((gx as f32 + 0.5) / sw, (gy as f32 + 0.5) / sh)
                 });
             }
@@ -422,7 +446,90 @@ impl Video {
             }
         }
     }
+
+    /// Render [`Encoding::Sextant`]: each cell is a 2×3 grid of solid sub-blocks split
+    /// into two colours. The sub-blocks at or above the cell's mean luminance form the
+    /// foreground (their average is the glyph's fg, the [`SEXTANT`] character with those
+    /// bits set); the rest form the background (its average is the cell bg). A flat cell
+    /// has an empty background group, so it falls back to a solid `█` of its one colour.
+    fn render_sextant(
+        &self,
+        buf: &mut Buffer,
+        area: Rect,
+        gw: usize,
+        gh: usize,
+        filters: &[CompiledFilter],
+        grid: impl Fn(usize, usize) -> Rgb,
+    ) {
+        let (aw, ah) = (area.width as usize, area.height as usize);
+        let (sw, sh) = (gw as f32, gh as f32);
+        for row in 0..ah {
+            for col in 0..aw {
+                // Sample the six sub-blocks (filtered), keeping colour and luma.
+                let mut cols = [(0u8, 0u8, 0u8); 6];
+                let mut lums = [0.0f32; 6];
+                let mut mean = 0.0;
+                for sy in 0..3 {
+                    for sx in 0..2 {
+                        let (gx, gy) = (col * 2 + sx, row * 3 + sy);
+                        let (u, v) = ((gx as f32 + 0.5) / sw, (gy as f32 + 0.5) / sh);
+                        let c = shade(filters, gy, u, v, grid(gx, gy));
+                        let i = sy * 2 + sx;
+                        cols[i] = c;
+                        lums[i] = luma(c);
+                        mean += lums[i];
+                    }
+                }
+                mean /= 6.0;
+
+                // Partition: sub-blocks at/above the mean luma are foreground. Bit
+                // `sy*2 + sx` indexes the sub-block, matching the SEXTANT numbering.
+                let mut mask = 0usize;
+                let (mut fg, mut nf) = ((0u32, 0u32, 0u32), 0u32);
+                let (mut bg, mut nb) = ((0u32, 0u32, 0u32), 0u32);
+                for (i, &(r, g, b)) in cols.iter().enumerate() {
+                    if lums[i] >= mean {
+                        mask |= 1 << i;
+                        fg.0 += r as u32; fg.1 += g as u32; fg.2 += b as u32; nf += 1;
+                    } else {
+                        bg.0 += r as u32; bg.1 += g as u32; bg.2 += b as u32; nb += 1;
+                    }
+                }
+                // A flat cell lands every sub-block in one group — and float rounding of
+                // the mean can put all six *below* it, emptying the foreground group — so
+                // guard both counts (one is always non-zero, since `nf + nb == 6`). An
+                // empty group borrows the other's colour; the glyph is then a solid fill
+                // (`' '` over the bg, or `█`), so the cell reads as its one flat colour.
+                let avg = |s: (u32, u32, u32), n: u32| ((s.0 / n) as u8, (s.1 / n) as u8, (s.2 / n) as u8);
+                let (f, b) = match (nf, nb) {
+                    (0, _) => { let c = avg(bg, nb); (c, c) }
+                    (_, 0) => { let c = avg(fg, nf); (c, c) }
+                    _ => (avg(fg, nf), avg(bg, nb)),
+                };
+                let style =
+                    Style::default().fg(Color::Rgb(f.0, f.1, f.2)).bg(Color::Rgb(b.0, b.1, b.2));
+                buf.set_char(area.x + col as u16, area.y + row as u16, SEXTANT[mask], style);
+            }
+        }
+    }
 }
+
+/// Sextant glyphs indexed by a 6-bit sub-block mask — bit `row*2 + col` (row 0..3 top
+/// to bottom, col 0..2 left to right). Most are the Unicode 13 *Symbols for Legacy
+/// Computing* block sextants (`U+1FB00…`); the four masks Unicode unifies with older
+/// Block Elements use those instead (`' '`, `▌`, `▐`, `█`). Generated from the Unicode
+/// 16 character database (`BLOCK SEXTANT-…` names) — see commit notes.
+#[rustfmt::skip]
+const SEXTANT: [char; 64] = [
+    ' ', '🬀', '🬁', '🬂', '🬃', '🬄', '🬅', '🬆',
+    '🬇', '🬈', '🬉', '🬊', '🬋', '🬌', '🬍', '🬎',
+    '🬏', '🬐', '🬑', '🬒', '🬓', '▌', '🬔', '🬕',
+    '🬖', '🬗', '🬘', '🬙', '🬚', '🬛', '🬜', '🬝',
+    '🬞', '🬟', '🬠', '🬡', '🬢', '🬣', '🬤', '🬥',
+    '🬦', '🬧', '▐', '🬨', '🬩', '🬪', '🬫', '🬬',
+    '🬭', '🬮', '🬯', '🬰', '🬱', '🬲', '🬳', '🬴',
+    '🬵', '🬶', '🬷', '🬸', '🬹', '🬺', '🬻', '█',
+];
 
 // ── Filter compilation & sampling ──────────────────────────────────────────────────
 
@@ -659,6 +766,57 @@ mod tests {
         match lc.get(0, 0).style.bg {
             Color::Rgb(r, g, b) => assert!(g > r && g > b, "LumaChroma bg carries the green hue: {r},{g},{b}"),
             other => panic!("LumaChroma bg should be an Rgb fill, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sextant_splits_a_cell_into_two_colours() {
+        // One cell (2×3 sub-blocks): top row white, lower two rows black. The bright
+        // sub-blocks become the fg glyph, the dark ones the bg — two colours, and the
+        // glyph is the top-row sextant (not blank, not a full block).
+        let frame = Frame::from_rgb(
+            2, 3,
+            vec![(255, 255, 255), (255, 255, 255), (0, 0, 0), (0, 0, 0), (0, 0, 0), (0, 0, 0)],
+        );
+        let area = Rect::new(0, 0, 1, 1);
+        let mut buf = Buffer::empty(area);
+        Video::new().encoding(Encoding::Sextant).sampling(Sampling::Nearest).render_frame(&mut buf, area, &frame);
+        let cell = buf.get(0, 0);
+        assert_eq!(cell.style.fg, Color::Rgb(255, 255, 255), "fg is the bright group");
+        assert_eq!(cell.style.bg, Color::Rgb(0, 0, 0), "bg is the dark group");
+        assert_eq!(cell.symbol, "🬂", "top-row sextant (BLOCK SEXTANT-12)");
+    }
+
+    #[test]
+    fn sextant_renders_a_flat_cell_as_a_solid_block() {
+        // A uniform cell has no dark group, so it falls back to a solid `█` of its colour.
+        let frame = Frame::from_rgb(1, 1, vec![(40, 160, 60)]);
+        let area = Rect::new(0, 0, 1, 1);
+        let mut buf = Buffer::empty(area);
+        Video::new().encoding(Encoding::Sextant).render_frame(&mut buf, area, &frame);
+        let cell = buf.get(0, 0);
+        assert_eq!(cell.symbol, "█", "flat cell is a full block");
+        assert_eq!(cell.style.fg, Color::Rgb(40, 160, 60));
+    }
+
+    #[test]
+    fn sextant_flat_cells_render_solid_without_dividing_by_zero() {
+        // A uniform frame gives every sub-block the same luma, so float rounding of the
+        // mean can leave one colour group empty. Each cell must render as a single solid
+        // colour (fg == bg), never divide by zero. `(0, 0, 255)` is the exact synth
+        // colour bar that crashed `render_sextant` (its luma's 6-fold sum rounds *above*
+        // itself, emptying the foreground group); the others guard nearby cases.
+        let area = Rect::new(0, 0, 5, 5);
+        for c in [(0, 0, 255), (0, 0, 25), (0, 0, 90), (0, 0, 0), (255, 255, 255), (100, 150, 200)] {
+            let frame = Frame::from_rgb(2, 2, vec![c, c, c, c]);
+            let mut buf = Buffer::empty(area);
+            Video::new().encoding(Encoding::Sextant).render_frame(&mut buf, area, &frame);
+            for y in 0..5 {
+                for x in 0..5 {
+                    let cell = buf.get(x, y);
+                    assert_eq!(cell.style.fg, cell.style.bg, "flat cell {c:?} should be one solid colour");
+                }
+            }
         }
     }
 
