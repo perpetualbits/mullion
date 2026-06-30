@@ -346,10 +346,12 @@ impl Video {
                 let style = if matches!(self.encoding, Encoding::LumaChroma) {
                     // Luma/chroma split: brighten the dots toward white (more where the
                     // cell is brighter, so shadows keep their hue and don't speckle) and
-                    // fill the background with a dimmed version of the hue.
+                    // fill the background with a dimmed version of the hue. The background
+                    // keeps most of its value (0.72) so shadows carry visible colour
+                    // rather than going near-black — tuned by eye on skin/foliage stills.
                     let y = luma(avg) / 255.0;
                     let fg = lerp_rgb(avg, (255, 255, 255), 0.4 * y);
-                    let bg = scale(avg, 0.6);
+                    let bg = scale(avg, 0.72);
                     Style::default().fg(Color::Rgb(fg.0, fg.1, fg.2)).bg(Color::Rgb(bg.0, bg.1, bg.2))
                 } else {
                     Style::default().fg(Color::Rgb(avg.0, avg.1, avg.2))
