@@ -124,25 +124,27 @@ pub enum Encoding {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Dither {
     /// **Ordered** (4×4 Bayer): each sub-pixel thresholds against a fixed matrix.
-    /// Cheap and **temporally stable** (no frame-to-frame shimmer), but leaves a
-    /// regular cross-hatch in flat areas.
-    #[default]
+    /// Cheap and **temporally stable** (no frame-to-frame shimmer) — preferable for fast
+    /// motion — but leaves a regular cross-hatch in flat areas.
     Bayer,
-    /// **Floyd–Steinberg error diffusion**: the quantisation error of each sub-pixel
-    /// is scattered into its neighbours, dissolving the grid into an organic stipple.
-    /// Higher fidelity on stills; can shimmer slightly in motion.
+    /// **Floyd–Steinberg error diffusion**: the quantisation error of each sub-pixel is
+    /// scattered into its neighbours, dissolving the grid into an organic stipple. The
+    /// **default** — highest fidelity and detail; can shimmer slightly in fast motion
+    /// (switch to [`Bayer`](Dither::Bayer) for a clip where that shows).
+    #[default]
     FloydSteinberg,
 }
 
 /// How a [`Frame`] is resampled to the cell grid.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Sampling {
-    /// **Bilinear**: blend the four nearest source pixels — smoothest, the faithful
-    /// default. About twice the per-frame cost of nearest.
-    #[default]
+    /// **Bilinear**: blend the four nearest source pixels — smoothest, at about twice the
+    /// per-frame cost of nearest. Choose it when fidelity matters more than speed.
     Bilinear,
-    /// **Nearest**: take the single closest source pixel — much cheaper, with a minor
-    /// quality loss that the braille dither largely hides. Good for fast/small panels.
+    /// **Nearest**: take the single closest source pixel — the **default**: about half the
+    /// sampling cost, with a minor quality loss that the dither largely hides. Best for
+    /// video and large panels.
+    #[default]
     Nearest,
 }
 
@@ -211,8 +213,9 @@ pub struct Video {
 }
 
 impl Video {
-    /// A faithful widget: [`Braille`](Encoding::Braille), [`Bayer`](Dither::Bayer)
-    /// dither, [`Bilinear`](Sampling::Bilinear) sampling, no filters.
+    /// A widget tuned for video: [`Braille`](Encoding::Braille),
+    /// [`FloydSteinberg`](Dither::FloydSteinberg) dither, [`Nearest`](Sampling::Nearest)
+    /// sampling, no filters.
     pub fn new() -> Self {
         Self::default()
     }

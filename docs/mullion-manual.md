@@ -1337,15 +1337,16 @@ against colour resolution:
   the output bytes (a background per cell). Needs a font with the Unicode 13 sextant
   glyphs (`U+1FB00…`), which most modern terminal fonts have.
 
-For braille, a **`Dither`** chooses how sub-pixels are quantised: `Bayer` (ordered —
-cheap and **temporally stable**, but a regular cross-hatch in flat areas) or
-`FloydSteinberg` (error diffusion — scatters the quantisation error into neighbours,
-dissolving the grid into an organic stipple; higher fidelity on stills, can shimmer
-slightly in motion).
+For braille, a **`Dither`** chooses how sub-pixels are quantised: `FloydSteinberg` (the
+default — error diffusion scatters each sub-pixel's quantisation error into its
+neighbours, dissolving the grid into an organic stipple; highest fidelity and detail,
+can shimmer slightly in fast motion) or `Bayer` (ordered — cheap and **temporally
+stable**, preferable for fast motion, but a regular cross-hatch in flat areas).
 
-A **`Sampling`** mode controls how a `Frame` is resampled to the grid: `Bilinear` (the
-faithful default — blends the four nearest pixels) or `Nearest` (one pixel, ~2× faster,
-with a minor quality loss the dither largely hides — good for fast or small panels).
+A **`Sampling`** mode controls how a `Frame` is resampled to the grid: `Nearest` (the
+default — one pixel, ~2× faster, with a minor quality loss the dither largely hides;
+best for video and large panels) or `Bilinear` (blends the four nearest pixels —
+smoothest, when fidelity matters more than speed).
 The frame taps are precomputed once per axis, so `render_frame` does not re-derive them
 per sub-pixel.
 

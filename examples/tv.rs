@@ -241,7 +241,7 @@ fn run(term: &mut Terminal<CrosstermBackend<io::Stdout>>, mut source: Source) ->
     // on their own).
     let input = EventReader::new();
     let budget = Duration::from_millis(60);
-    let mut st = State { t: 0.0, encoding: Encoding::Braille, dither: Dither::Bayer, sampling: Sampling::Bilinear, depth: ColorDepth::TrueColor, filters: [false; 6], paused: false };
+    let mut st = State { t: 0.0, encoding: Encoding::Braille, dither: Dither::default(), sampling: Sampling::default(), depth: ColorDepth::TrueColor, filters: [false; 6], paused: false };
     'frames: loop {
         let start = Instant::now();
         for ev in input.drain() {
