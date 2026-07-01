@@ -133,6 +133,14 @@ pub enum Dither {
     /// (switch to [`Bayer`](Dither::Bayer) for a clip where that shows).
     #[default]
     FloydSteinberg,
+    /// **Temporal Bayer**: the ordered matrix, but its threshold is nudged by a different
+    /// sub-step each frame (a 4-frame bit-reversed sequence), so a sub-pixel near a
+    /// brightness boundary flips on and off across frames. The eye time-averages four
+    /// frames into **4× the luminance levels** of static [`Bayer`](Dither::Bayer) — smooth
+    /// gradients with no extra cost (the cells are redrawn every frame anyway). Needs the
+    /// [`frame`](Video::frame) index advanced each frame, and a steady ≥~30 fps or it reads
+    /// as flicker rather than fusing. Best for smooth playback on moderate screens.
+    TemporalBayer,
 }
 
 /// How a [`Frame`] is resampled to the cell grid.
@@ -210,6 +218,7 @@ pub struct Video {
     dither: Dither,
     sampling: Sampling,
     filters: Vec<Filter>,
+    frame: u32,
 }
 
 impl Video {
@@ -229,6 +238,13 @@ impl Video {
     /// Choose the braille [`Dither`] (builder); ignored by [`Encoding::HalfBlock`].
     pub fn dither(mut self, dither: Dither) -> Self {
         self.dither = dither;
+        self
+    }
+
+    /// Set the frame index for [`Dither::TemporalBayer`] (builder). Advance it by one each
+    /// rendered frame so the temporal dither cycles; other dithers ignore it. Wraps freely.
+    pub fn frame(mut self, frame: u32) -> Self {
+        self.frame = frame;
         self
     }
 
@@ -398,6 +414,20 @@ impl Video {
                 for gy in 0..gh {
                     for gx in 0..gw {
                         let thr = (BAYER[gy % 4][gx % 4] as f32 + 0.5) / 16.0;
+                        lit[gy * gw + gx] = lum[gy * gw + gx] > thr;
+                    }
+                }
+            }
+            Dither::TemporalBayer => {
+                // Bayer (16 levels) refined by a 4-frame bit-reversed temporal sub-step,
+                // so space+time gives 64 threshold levels. The mean over the 4 frames
+                // equals static Bayer (unbiased), but each frame's threshold is offset, so
+                // boundary sub-pixels flip across frames and the eye fuses 4× the levels.
+                const TEMPORAL: [u8; 4] = [0, 2, 1, 3];
+                let t = TEMPORAL[(self.frame % 4) as usize] as f32;
+                for gy in 0..gh {
+                    for gx in 0..gw {
+                        let thr = (BAYER[gy % 4][gx % 4] as f32 * 4.0 + t + 0.5) / 64.0;
                         lit[gy * gw + gx] = lum[gy * gw + gx] > thr;
                     }
                 }
@@ -823,6 +853,34 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn temporal_bayer_shifts_levels_across_frames() {
+        // A flat grey between Bayer steps: static Bayer would light the same dots every
+        // frame, but TemporalBayer nudges the threshold each frame, so the lit count
+        // varies over the 4-frame cycle and the time-average tracks the grey more finely.
+        let frame = Frame::from_luma(1, 1, &[100]); // ≈0.392, between Bayer levels
+        let area = Rect::new(0, 0, 8, 8);
+        let lit_at = |f: u32| {
+            let mut buf = Buffer::empty(area);
+            Video::new().dither(Dither::TemporalBayer).frame(f).render_frame(&mut buf, area, &frame);
+            let mut lit = 0u32;
+            for y in 0..8 {
+                for x in 0..8 {
+                    lit += (buf.get(x, y).symbol.chars().next().unwrap() as u32 - 0x2800).count_ones();
+                }
+            }
+            lit
+        };
+        let counts = [lit_at(0), lit_at(1), lit_at(2), lit_at(3)];
+        assert!(
+            counts.iter().min() != counts.iter().max(),
+            "temporal frames must differ in lit count, got {counts:?}"
+        );
+        // 4-frame mean fraction tracks the grey (4 frames × 64 cells × 8 dots)
+        let frac = counts.iter().sum::<u32>() as f32 / (4 * 8 * 8 * 8) as f32;
+        assert!((frac - 100.0 / 255.0).abs() < 0.05, "temporal mean {frac} should track 0.392");
     }
 
     #[test]

@@ -1340,8 +1340,12 @@ against colour resolution:
 For braille, a **`Dither`** chooses how sub-pixels are quantised: `FloydSteinberg` (the
 default — error diffusion scatters each sub-pixel's quantisation error into its
 neighbours, dissolving the grid into an organic stipple; highest fidelity and detail,
-can shimmer slightly in fast motion) or `Bayer` (ordered — cheap and **temporally
-stable**, preferable for fast motion, but a regular cross-hatch in flat areas).
+can shimmer slightly in fast motion), `Bayer` (ordered — cheap and **temporally
+stable**, preferable for fast motion, but a regular cross-hatch in flat areas), or
+`TemporalBayer` (ordered with a per-frame threshold sub-step — over a 4-frame cycle the
+eye fuses **4× the luminance levels** of static Bayer, smooth gradients for free since
+the cells redraw each frame; advance `Video::frame` every frame and hold a steady
+≥~30 fps, or it reads as flicker instead of fusing).
 
 A **`Sampling`** mode controls how a `Frame` is resampled to the grid: `Nearest` (the
 default — one pixel, ~2× faster, with a minor quality loss the dither largely hides;

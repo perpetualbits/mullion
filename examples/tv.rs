@@ -13,7 +13,7 @@
 //!
 //! Keys
 //!   e              encoding: braille → half-block → luma-chroma → sextant
-//!   d              dither: Bayer (ordered) ↔ Floyd–Steinberg (error diffusion)
+//!   d              dither: Bayer (ordered) → Floyd–Steinberg → temporal (4-frame Bayer)
 //!   n              sampling: bilinear ↔ nearest
 //!   c              colour depth: truecolor → 256 → 16 (fewer output bytes, lower fidelity)
 //!   1..6           toggle scanlines / vignette / phosphor / gamma / saturation / grey
@@ -52,6 +52,7 @@ const FILTER_NAMES: [&str; 6] = ["scanlines", "vignette", "phosphor", "gamma", "
 
 struct State {
     t: f32,
+    frame: u32,
     encoding: Encoding,
     dither: Dither,
     sampling: Sampling,
@@ -190,7 +191,7 @@ fn render(buf: &mut Buffer, st: &State, frame: &Frame, source: &str) {
     if area.height < 4 {
         return;
     }
-    let mut video = Video::new().encoding(st.encoding).dither(st.dither).sampling(st.sampling);
+    let mut video = Video::new().encoding(st.encoding).dither(st.dither).sampling(st.sampling).frame(st.frame);
     for (i, &on) in st.filters.iter().enumerate() {
         if on {
             video = video.filter(FILTERS[i]);
@@ -204,7 +205,7 @@ fn render(buf: &mut Buffer, st: &State, frame: &Frame, source: &str) {
     let status = format!(" source: {}   encoding: {}   dither: {}   sampling: {}   colour: {}   filters: {}",
         source,
         match st.encoding { Encoding::Braille => "braille", Encoding::HalfBlock => "half-block", Encoding::LumaChroma => "luma-chroma", Encoding::Sextant => "sextant" },
-        match st.dither { Dither::Bayer => "bayer", Dither::FloydSteinberg => "floyd-steinberg" },
+        match st.dither { Dither::Bayer => "bayer", Dither::FloydSteinberg => "floyd-steinberg", Dither::TemporalBayer => "temporal" },
         match st.sampling { Sampling::Bilinear => "bilinear", Sampling::Nearest => "nearest" },
         match st.depth { ColorDepth::TrueColor => "truecolor", ColorDepth::Palette256 => "256", ColorDepth::Palette16 => "16" },
         if active.is_empty() { "none (faithful)".to_string() } else { active.join(", ") });
@@ -240,8 +241,8 @@ fn run(term: &mut Terminal<CrosstermBackend<io::Stdout>>, mut source: Source) ->
     // is slow to draw (otherwise queued events replay in bursts and modes seem to flip
     // on their own).
     let input = EventReader::new();
-    let budget = Duration::from_millis(60);
-    let mut st = State { t: 0.0, encoding: Encoding::Braille, dither: Dither::default(), sampling: Sampling::default(), depth: ColorDepth::TrueColor, filters: [false; 6], paused: false };
+    let budget = Duration::from_millis(33); // ~30 fps — enough for temporal dither to fuse
+    let mut st = State { t: 0.0, frame: 0, encoding: Encoding::Braille, dither: Dither::default(), sampling: Sampling::default(), depth: ColorDepth::TrueColor, filters: [false; 6], paused: false };
     'frames: loop {
         let start = Instant::now();
         for ev in input.drain() {
@@ -259,7 +260,8 @@ fn run(term: &mut Terminal<CrosstermBackend<io::Stdout>>, mut source: Source) ->
                     KeyCode::Char('d') => {
                         st.dither = match st.dither {
                             Dither::Bayer => Dither::FloydSteinberg,
-                            Dither::FloydSteinberg => Dither::Bayer,
+                            Dither::FloydSteinberg => Dither::TemporalBayer,
+                            Dither::TemporalBayer => Dither::Bayer,
                         };
                     }
                     KeyCode::Char('n') => {
@@ -287,6 +289,7 @@ fn run(term: &mut Terminal<CrosstermBackend<io::Stdout>>, mut source: Source) ->
         let frame = source.frame(st.t);
         let label = source.label();
         term.draw(|buf| render(buf, &st, &frame, label))?;
+        st.frame = st.frame.wrapping_add(1); // advance every drawn frame so temporal dither cycles
         if !st.paused {
             st.t += 0.08;
         }
