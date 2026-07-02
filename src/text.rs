@@ -837,6 +837,7 @@ pub fn render_wrapped(buf: &mut Buffer, area: Rect, text: &WrappedText, scroll_t
 /// end boundary homes to the trailing edge of the last logical grapheme. This is
 /// the shared basis for [`visual_step`], [`caret_visual_col`] and
 /// [`caret_from_visual_col`].
+#[allow(clippy::needless_range_loop)] // `l` indexes boundaries *and* the CursorMap
 fn caret_cols(text: &str, base: BaseDirection) -> (Vec<usize>, Vec<u16>) {
     let mut boundaries: Vec<usize> = text.grapheme_indices(true).map(|(b, _)| b).collect();
     let n = boundaries.len();
@@ -897,7 +898,7 @@ pub fn visual_step(text: &str, cursor: usize, dir: crate::tree::Direction, ctx: 
     let pick = |cmp: &dyn Fn(u16, u16) -> bool, better: &dyn Fn(u16, u16) -> bool| -> Option<usize> {
         let mut best: Option<(u16, usize)> = None;
         for (i, &c) in cols.iter().enumerate() {
-            if cmp(c, cur_col) && best.map_or(true, |(bc, _)| better(c, bc)) {
+            if cmp(c, cur_col) && best.is_none_or(|(bc, _)| better(c, bc)) {
                 best = Some((c, i));
             }
         }

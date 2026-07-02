@@ -288,6 +288,7 @@ impl ColumnGrid {
     /// direction-aware `…` via [`elide`](crate::text::elide) (grapheme-cluster and
     /// width correct — never a split cluster or half-glyph). Zero-width rects are
     /// ignored.
+    #[allow(clippy::too_many_arguments)] // positional draw params, mirrors write_text
     pub fn write_text_ctx(
         buf:   &mut Buffer,
         rect:  Rect,
