@@ -37,8 +37,6 @@
 //! ColumnGrid::write_bar(buf, col_rects[3], y, 0.423, '█', dim, '░', dim, None);
 //! ```
 
-use unicode_width::UnicodeWidthStr;
-
 use crate::buffer::Buffer;
 use crate::geometry::Rect;
 use crate::label::Align;
@@ -46,6 +44,7 @@ use crate::layout::{Constraint, Node, Orientation, Size};
 use crate::layout::TileId;
 use crate::render::render_carousel;
 use crate::style::Style;
+use crate::text::{elide, render_line, shape_line, TextCtx};
 
 // ── ColumnKind ────────────────────────────────────────────────────────────────
 
@@ -255,46 +254,48 @@ impl ColumnGrid {
         }
     }
 
-    /// Write text into a column rect with alignment and `…` truncation.
+    /// Write text into a column rect with alignment and `…` truncation (LTR).
     ///
-    /// - `Align::Start`  — flush left (no padding)
-    /// - `Align::End`    — flush right (leading spaces)
+    /// A convenience wrapper over [`write_text_ctx`](ColumnGrid::write_text_ctx) with
+    /// [`TextCtx::LTR`]. Prefer the `_ctx` form when a base direction is in play.
+    pub fn write_text(buf: &mut Buffer, rect: Rect, y: u16, text: &str, align: Align, style: Style) {
+        Self::write_text_ctx(buf, rect, y, text, align, style, TextCtx::LTR);
+    }
+
+    /// Write text into a column rect, grapheme/width/bidi correct, per `ctx`.
+    ///
+    /// - `Align::Start`  — flush leading (no padding)
+    /// - `Align::End`    — flush trailing (leading spaces)
     /// - `Align::Center` — centred; odd remainder biases toward `Start`
     ///
-    /// Text wider than `rect.width` is truncated with a `…` suffix.
-    /// Zero-width rects are silently ignored.
-    pub fn write_text(
+    /// The text is shaped through [`shape_line`](crate::text::shape_line) so RTL and
+    /// mixed content read correctly; text wider than `rect.width` is truncated with a
+    /// direction-aware `…` via [`elide`](crate::text::elide) (grapheme-cluster and
+    /// width correct — never a split cluster or half-glyph). Zero-width rects are
+    /// ignored.
+    pub fn write_text_ctx(
         buf:   &mut Buffer,
         rect:  Rect,
         y:     u16,
         text:  &str,
         align: Align,
         style: Style,
+        ctx:   TextCtx,
     ) {
         if rect.width == 0 { return; }
-        let w = rect.width as usize;
-        let display_w = UnicodeWidthStr::width(text);
-
-        if display_w <= w {
+        let w = rect.width;
+        let line = shape_line(text, 0, ctx.base);
+        let dw = line.width();
+        if dw <= w {
             let x_offset = match align {
                 Align::Start  => 0,
-                Align::Center => (w - display_w) / 2,
-                Align::End    => w - display_w,
+                Align::Center => (w - dw) / 2,
+                Align::End    => w - dw,
             };
-            buf.set_string(rect.x + x_offset as u16, y, text, style);
+            render_line(buf, rect.x + x_offset, y, &line, w, style);
         } else {
-            // Truncate: collect chars until we'd exceed (w-1) display cols,
-            // then append the single-width ellipsis.
-            let mut used = 0usize;
-            let mut truncated = String::new();
-            for ch in text.chars() {
-                let cw = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(1);
-                if used + cw + 1 > w { break; } // +1 for ellipsis
-                truncated.push(ch);
-                used += cw;
-            }
-            truncated.push('…');
-            buf.set_string(rect.x, y, &truncated, style);
+            let clipped = elide(text, w, ctx);
+            render_line(buf, rect.x, y, &clipped, w, style);
         }
     }
 
@@ -576,6 +577,16 @@ mod tests {
         let content: String = (0..5).map(|x| buf.get(x, 0).symbol.chars().next().unwrap_or(' ')).collect();
         // 4 chars + ellipsis = 5
         assert_eq!(&content, "abcd…");
+    }
+
+    #[test]
+    fn write_text_ctx_renders_rtl_visually() {
+        use crate::text::TextCtx;
+        let mut buf = Buffer::empty(area(6));
+        // Logical "אבג" displays right-to-left as גבא through the shaper.
+        ColumnGrid::write_text_ctx(&mut buf, area(6), 0, "אבג", Align::Start, Style::default(), TextCtx::rtl());
+        let content: Vec<String> = (0..3).map(|x| buf.get(x, 0).symbol.clone()).collect();
+        assert_eq!(content, vec!["ג", "ב", "א"]);
     }
 
     #[test]

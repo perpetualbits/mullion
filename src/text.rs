@@ -732,6 +732,64 @@ pub fn shape_line(text: &str, _width: u16, base: BaseDirection) -> VisualLine {
     build_line(text, 0..text.len(), &info)
 }
 
+/// Truncate `text` to at most `max_cols` display columns — grapheme-cluster and
+/// width correct, and **direction-aware** — returning the shaped [`VisualLine`]
+/// ready for [`render_line`].
+///
+/// The reading-leading side is kept and a single-width `…` marks where content was
+/// dropped: under LTR the ellipsis sits on the right, under RTL on the left. A wide
+/// grapheme that will not fit the budget is dropped whole (never a half-glyph).
+/// When `text` already fits, the full shaped line is returned unchanged.
+pub fn elide(text: &str, max_cols: u16, ctx: TextCtx) -> VisualLine {
+    let line = shape_line(text, 0, ctx.base);
+    if max_cols == 0 {
+        return empty_visual_line();
+    }
+    if line.width() <= max_cols {
+        return line;
+    }
+    let budget = max_cols - 1; // one column for the ellipsis
+    let rtl = matches!(ctx.base, BaseDirection::Rtl);
+    let ell = VisualCell { symbol: "…".to_string(), width: 1, source_byte: text.len() };
+
+    // Collect cells from the reading-leading side (visual-left for LTR, visual-right
+    // for RTL) until the budget is spent.
+    let mut kept: Vec<VisualCell> = Vec::new();
+    let mut used = 0u16;
+    let take = |cell: &VisualCell, used: &mut u16, kept: &mut Vec<VisualCell>| -> bool {
+        let w = cell.width as u16;
+        if *used + w > budget {
+            return false;
+        }
+        kept.push(cell.clone());
+        *used += w;
+        true
+    };
+    if rtl {
+        for cell in line.cells.iter().rev() {
+            if !take(cell, &mut used, &mut kept) { break; }
+        }
+    } else {
+        for cell in line.cells.iter() {
+            if !take(cell, &mut used, &mut kept) { break; }
+        }
+    }
+
+    // Reassemble in visual (left-to-right) order with the ellipsis on the trailing side.
+    let cells: Vec<VisualCell> = if rtl {
+        let mut v = Vec::with_capacity(kept.len() + 1);
+        v.push(ell);
+        v.extend(kept.into_iter().rev()); // kept was gathered right-to-left
+        v
+    } else {
+        kept.push(ell);
+        kept
+    };
+
+    let map = CursorMap::from_v2l((0..cells.len()).collect());
+    VisualLine { cells, map, source: 0..text.len() }
+}
+
 // ── Rendering ────────────────────────────────────────────────────────────────
 
 /// Draw one visual line into `buf` at `(x, y)`, clipped to `max_width` columns.
@@ -925,6 +983,18 @@ mod tests {
         assert_eq!(shape_digits("7", DigitShaping::ExtendedArabicIndic), "۷");
         // Non-digits pass through untouched.
         assert_eq!(shape_digits("v1.0", DigitShaping::ArabicIndic), "v١.٠");
+    }
+
+    #[test]
+    fn elide_is_grapheme_width_and_direction_aware() {
+        // LTR: keep the start, ellipsis on the right.
+        assert_eq!(visual_string(&elide("abcdef", 4, TextCtx::LTR)), "abc…");
+        // Already fits → unchanged.
+        assert_eq!(visual_string(&elide("abc", 5, TextCtx::LTR)), "abc");
+        // A wide grapheme that won't fit the budget is dropped whole, not split.
+        assert_eq!(visual_string(&elide("a世界b", 4, TextCtx::LTR)), "a世…");
+        // RTL: ellipsis on the LEFT, reading-start (rightmost) kept.
+        assert_eq!(visual_string(&elide("אבג", 2, TextCtx::rtl())), "…א");
     }
 
     #[test]
