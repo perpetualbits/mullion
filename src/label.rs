@@ -64,6 +64,34 @@ pub enum Align {
     End,
 }
 
+/// A *physical* horizontal anchor, after resolving a logical [`Align`] against a
+/// base direction (§round-2 A5). `Start`/`End` are leading/trailing edges that
+/// flip under RTL; `Anchor` is the concrete left/centre/right they resolve to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Anchor {
+    Left,
+    Center,
+    Right,
+}
+
+impl Align {
+    /// Resolve this logical alignment to a physical [`Anchor`] for `base`.
+    ///
+    /// Under LTR: `Start → Left`, `End → Right`. Under RTL these flip
+    /// (`Start → Right`, `End → Left`). `Center` is invariant. `Auto` is treated
+    /// as LTR (a caller that has resolved auto-direction passes the concrete base).
+    pub fn resolve(self, base: crate::text::BaseDirection) -> Anchor {
+        use crate::text::BaseDirection::Rtl;
+        match (self, base) {
+            (Align::Center, _)      => Anchor::Center,
+            (Align::Start, Rtl)     => Anchor::Right,
+            (Align::Start, _)       => Anchor::Left,
+            (Align::End,   Rtl)     => Anchor::Left,
+            (Align::End,   _)       => Anchor::Right,
+        }
+    }
+}
+
 /// A text label to draw on a tile's border edge.
 pub struct Label {
     /// The text to display.  For vertical labels only width-1 graphemes are

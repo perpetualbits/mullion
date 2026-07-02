@@ -80,11 +80,11 @@ pub mod vlist;
 pub mod zoom;
 
 pub use backend::{Backend, CrosstermBackend, TestBackend};
-pub use label::{draw_label, label_period, Align, Label, Side};
+pub use label::{draw_label, label_period, Align, Anchor, Label, Side};
 pub use border::{draw_box, frame_tiles, render_rim, render_shared, BorderGap, BorderStyle, Borders, CornerStyle, LineWeight};
 pub use buffer::{Buffer, Cell};
 pub use edit::{line_edit, render_field, FieldRender};
-pub use geometry::{visible_window, Rect};
+pub use geometry::{mirror_rects_in, visible_window, Rect};
 pub use panel::{draw_panel, Panel};
 pub use input::{InputRouter, Keymap, KeyCode, KeyEvent, KeyModifiers, KeyOutcome, MouseButton, MouseEvent, MouseEventKind, MouseOutcome, NavCommand};
 pub use mouse::{carousel_at, tile_at};
@@ -105,7 +105,7 @@ pub use route::{render as render_connectors, route, route_all, Connector, RouteR
 pub use runaround::{flow, render_flow, slots_in, PlacedLine, Slot};
 pub use socket::{bookends, draw_socket, Flow, FlowStyle, Socket};
 pub use sugiyama::{assign_layers, auto_layout, crossings, order_layers, LayerDir, SugiyamaParams};
-pub use vlist::{render_scrollbar, ScrollMetrics, VirtualList};
+pub use vlist::{render_scrollbar, scrollbar_side, ScrollMetrics, VirtualList};
 pub use zoom::{lerp_rect, FocusTarget, Lod, LodScale, Zoom};
 pub use table::{ColumnDef, ColumnGrid, ColumnKind, Table};
 pub use text::{

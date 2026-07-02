@@ -147,12 +147,24 @@ impl ColumnDef {
 /// every frame or whenever the area changes.
 pub struct ColumnGrid {
     columns: Vec<ColumnDef>,
+    /// When set, [`resolve`](ColumnGrid::resolve) mirrors the column rects for a
+    /// right-to-left layout (§round-2 A5), so column 0 sits at the right edge.
+    mirror: bool,
 }
 
 impl ColumnGrid {
     /// Construct a new grid from a list of column definitions.
     pub fn new(columns: Vec<ColumnDef>) -> Self {
-        Self { columns }
+        Self { columns, mirror: false }
+    }
+
+    /// Mirror the resolved column order for `base` (RTL reverses it; LTR is a
+    /// no-op). Column *indices* are preserved — `cols[0]` is still the first
+    /// declared column, only positioned from the right — so callers index the
+    /// same way regardless of direction.
+    pub fn mirrored(mut self, base: crate::text::BaseDirection) -> Self {
+        self.mirror = matches!(base, crate::text::BaseDirection::Rtl);
+        self
     }
 
     /// Resolve all column widths for `area` and return one `Rect` per column.
@@ -198,6 +210,9 @@ impl ColumnGrid {
             if idx < rects.len() {
                 rects[idx] = rect;
             }
+        }
+        if self.mirror {
+            crate::geometry::mirror_rects_in(area, &mut rects);
         }
         rects
     }
@@ -577,6 +592,37 @@ mod tests {
         let content: String = (0..5).map(|x| buf.get(x, 0).symbol.chars().next().unwrap_or(' ')).collect();
         // 4 chars + ellipsis = 5
         assert_eq!(&content, "abcd…");
+    }
+
+    #[test]
+    fn mirrored_grid_reverses_positions_keeping_indices() {
+        use crate::text::BaseDirection;
+        let grid = ColumnGrid::new(vec![
+            ColumnDef::fixed(10, ColumnKind::Text),
+            ColumnDef::fill(1, ColumnKind::Bar),
+        ]);
+        let area = Rect::new(0, 0, 30, 1);
+        let ltr = grid.resolve(area);
+        let grid2 = ColumnGrid::new(vec![
+            ColumnDef::fixed(10, ColumnKind::Text),
+            ColumnDef::fill(1, ColumnKind::Bar),
+        ]);
+        let rtl = grid2.mirrored(BaseDirection::Rtl).resolve(area);
+        // Index 0 is still the 10-wide column, but now flush right (x=20) not left.
+        assert_eq!(ltr[0].x, 0);
+        assert_eq!(rtl[0].x, 20);
+        assert_eq!(rtl[0].width, 10);
+        assert_eq!(rtl[1].x, 0); // the fill column moved to the left
+    }
+
+    #[test]
+    fn align_resolves_against_direction() {
+        use crate::label::Anchor;
+        use crate::text::BaseDirection::{Ltr, Rtl};
+        assert_eq!(Align::Start.resolve(Ltr), Anchor::Left);
+        assert_eq!(Align::Start.resolve(Rtl), Anchor::Right);
+        assert_eq!(Align::End.resolve(Rtl), Anchor::Left);
+        assert_eq!(Align::Center.resolve(Rtl), Anchor::Center);
     }
 
     #[test]

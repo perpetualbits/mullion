@@ -263,9 +263,41 @@ pub fn visible_window(
     start..end
 }
 
+/// Reflect each rect horizontally about the vertical centre axis of `area`, in
+/// place — mirroring column order (a [`ColumnGrid`](crate::table::ColumnGrid)) or
+/// pane order (a solved `Split` row) for a right-to-left layout (§round-2 A5).
+///
+/// Each rect keeps its width and vertical extent; only `x` is flipped, so a rect
+/// flush to `area`'s left edge lands flush to its right edge. Rects are assumed to
+/// lie within `area`'s horizontal span; anything outside is clamped by saturation.
+pub fn mirror_rects_in(area: Rect, rects: &mut [Rect]) {
+    for r in rects.iter_mut() {
+        let offset_from_left = r.x.saturating_sub(area.x);
+        let inner_right = offset_from_left.saturating_add(r.width);
+        r.x = area.x + area.width.saturating_sub(inner_right);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mirror_rects_flips_x_and_preserves_width() {
+        let area = Rect::new(0, 0, 30, 1);
+        // Three 10-wide columns at x=0,10,20.
+        let mut rects = [Rect::new(0, 0, 10, 1), Rect::new(10, 0, 10, 1), Rect::new(20, 0, 10, 1)];
+        mirror_rects_in(area, &mut rects);
+        assert_eq!(rects[0].x, 20); // leftmost → rightmost
+        assert_eq!(rects[1].x, 10); // centre stays
+        assert_eq!(rects[2].x, 0);  // rightmost → leftmost
+        assert!(rects.iter().all(|r| r.width == 10));
+        // Non-zero area origin is respected.
+        let area2 = Rect::new(5, 0, 20, 1);
+        let mut r = [Rect::new(5, 0, 6, 1)];
+        mirror_rects_in(area2, &mut r);
+        assert_eq!(r[0].x, 5 + 20 - 6); // flush-left → flush-right
+    }
 
     #[test]
     fn area() {

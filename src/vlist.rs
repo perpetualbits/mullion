@@ -285,6 +285,16 @@ pub struct ScrollMetrics {
 /// track; the track is drawn in that color with a [`Modifier::DIM`] so it recedes
 /// behind the thumb.
 ///
+/// Which gutter a vertical scrollbar occupies for a base direction (§round-2 A5):
+/// [`Side::Left`] under RTL, [`Side::Right`] otherwise — so the bar sits on the
+/// trailing edge of the reading direction.
+pub fn scrollbar_side(base: crate::text::BaseDirection) -> crate::label::Side {
+    match base {
+        crate::text::BaseDirection::Rtl => crate::label::Side::Left,
+        _ => crate::label::Side::Right,
+    }
+}
+
 /// Does nothing for a zero-size rect.
 pub fn render_scrollbar(buf: &mut Buffer, rect: Rect, metrics: ScrollMetrics, style: Style) {
     if rect.height == 0 || rect.width == 0 {
