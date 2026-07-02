@@ -939,6 +939,49 @@ pub fn caret_from_visual_col(text: &str, col: u16, ctx: TextCtx) -> usize {
     boundaries[best.1]
 }
 
+// ── Selection (round-2 B6) ──────────────────────────────────────────────────
+
+/// Extend a selection one grapheme in **visual** space — the caret end of a
+/// selection moves exactly like a cursor, so this mirrors [`visual_step`]. The app
+/// owns the anchor and the caret; `caret` is the moving end.
+pub fn selection_step(text: &str, caret: usize, dir: crate::tree::Direction, ctx: TextCtx) -> Option<usize> {
+    visual_step(text, caret, dir, ctx)
+}
+
+/// Render one line, highlighting the cells whose `source_byte` falls in the logical
+/// selection range `sel` with `sel_style` (the rest use `style`).
+///
+/// Because selection membership is tested per source byte, a contiguous *logical*
+/// range that crosses a direction boundary highlights the correct — possibly
+/// **discontiguous** — visual span, which is the right bidi behavior. Clipped to
+/// `rect.width`; a wide cluster crossing the right edge is dropped.
+pub fn render_line_selected(
+    buf:       &mut Buffer,
+    rect:      Rect,
+    text:      &str,
+    sel:       Range<usize>,
+    style:     Style,
+    sel_style: Style,
+    ctx:       TextCtx,
+) {
+    if rect.width == 0 || rect.height == 0 {
+        return;
+    }
+    let line = shape_line(text, 0, ctx.base);
+    let limit = rect.x.saturating_add(rect.width);
+    let mut x = rect.x;
+    for cell in &line.cells {
+        let w = cell.width as u16;
+        if x.saturating_add(w) > limit {
+            break;
+        }
+        let selected = cell.source_byte >= sel.start && cell.source_byte < sel.end;
+        let st = if selected { sel_style } else { style };
+        buf.set_grapheme(x, rect.y, &cell.symbol, st);
+        x = x.saturating_add(w);
+    }
+}
+
 // ── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -995,6 +1038,25 @@ mod tests {
         assert_eq!(visual_string(&elide("a世界b", 4, TextCtx::LTR)), "a世…");
         // RTL: ellipsis on the LEFT, reading-start (rightmost) kept.
         assert_eq!(visual_string(&elide("אבג", 2, TextCtx::rtl())), "…א");
+    }
+
+    #[test]
+    fn render_line_selected_highlights_logical_range() {
+        use crate::style::{Color, Style};
+        let base = Style::default();
+        let sel = Style::default().bg(Color::Cyan);
+        let mut term = Terminal::new(TestBackend::new(5, 1)).unwrap();
+        term.draw(|buf| render_line_selected(buf, Rect::new(0, 0, 5, 1), "abcde", 1..3, base, sel, TextCtx::LTR)).unwrap();
+        let buf = term.backend().buffer();
+        assert_eq!(buf.get(1, 0).style.bg, Color::Cyan); // 'b' selected
+        assert_eq!(buf.get(2, 0).style.bg, Color::Cyan); // 'c' selected
+        assert_ne!(buf.get(0, 0).style.bg, Color::Cyan); // 'a' not
+        assert_ne!(buf.get(3, 0).style.bg, Color::Cyan); // 'd' not
+        // selection_step is the visual caret step (mirrors visual_step).
+        assert_eq!(
+            selection_step("abc", 0, crate::tree::Direction::Right, TextCtx::LTR),
+            visual_step("abc", 0, crate::tree::Direction::Right, TextCtx::LTR),
+        );
     }
 
     #[test]

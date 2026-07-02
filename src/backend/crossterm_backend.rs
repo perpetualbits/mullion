@@ -135,6 +135,18 @@ impl<W: Write> CrosstermBackend<W> {
         self.mouse_enabled = enabled;
     }
 
+    /// Copy `text` to the system clipboard via the OSC 52 escape (round-2 B6).
+    ///
+    /// Emits `ESC ] 52 ; c ; <base64> BEL`. Terminals without OSC-52 support (or
+    /// with it disabled) silently ignore it — the same best-effort posture as the
+    /// BDSM bidi mode. This is the only clipboard I/O mullion does; selection state
+    /// stays app-owned (see [`render_line_selected`](crate::text::render_line_selected)).
+    pub fn copy_to_clipboard(&mut self, text: &str) -> io::Result<()> {
+        let b64 = base64_encode(text.as_bytes());
+        write!(self.writer, "\x1b]52;c;{b64}\x07")?;
+        self.writer.flush()
+    }
+
     /// Set the colour depth applied during [`draw`](Backend::draw).
     ///
     /// [`ColorDepth::TrueColor`] (the default) is a no-op.  [`ColorDepth::Palette256`]
@@ -485,9 +497,32 @@ impl<W: Write> Backend for CrosstermBackend<W> {
     }
 }
 
+/// Standard base64 (RFC 4648) for the OSC-52 clipboard payload — small, so the
+/// backend avoids a dependency for it.
+fn base64_encode(data: &[u8]) -> String {
+    const A: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
+    for chunk in data.chunks(3) {
+        let b = [chunk[0], *chunk.get(1).unwrap_or(&0), *chunk.get(2).unwrap_or(&0)];
+        let n = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | b[2] as u32;
+        out.push(A[(n >> 18 & 63) as usize] as char);
+        out.push(A[(n >> 12 & 63) as usize] as char);
+        out.push(if chunk.len() > 1 { A[(n >> 6 & 63) as usize] as char } else { '=' });
+        out.push(if chunk.len() > 2 { A[(n & 63) as usize] as char } else { '=' });
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn base64_matches_known_vectors() {
+        assert_eq!(base64_encode(b"foobar"), "Zm9vYmFy");
+        assert_eq!(base64_encode(b"f"), "Zg==");
+    }
+
 
     #[test]
     fn color_mapping_white_gray_darkgray() {
