@@ -21,12 +21,12 @@
 //! `unicode-width` so wide CJK/emoji and combining clusters behave.
 
 use unicode_segmentation::UnicodeSegmentation;
-use unicode_width::UnicodeWidthStr;
 
 use crate::buffer::{Buffer, Cell};
 use crate::geometry::{visible_window, Rect};
 use crate::input::KeyCode;
 use crate::style::Style;
+use crate::text::{caret_visual_col, shape_digits, shape_line, TextCtx};
 
 // ── line_edit ───────────────────────────────────────────────────────────────────
 
@@ -143,7 +143,7 @@ fn next_boundary(text: &str, byte: usize) -> usize {
 
 // ── render_field ────────────────────────────────────────────────────────────────
 
-/// Styling for [`render_field`].
+/// Styling and locale for [`render_field`].
 pub struct FieldRender {
     /// Style of the field's text (and its blank background).
     pub style: Style,
@@ -152,6 +152,10 @@ pub struct FieldRender {
     /// `Some(ch)` masks every grapheme with `ch` (one column each) for password
     /// entry; `None` shows the text verbatim.
     pub mask: Option<char>,
+    /// Base direction + digit shaping. Unmasked text is laid out in **visual**
+    /// order for this base (RTL/mixed render correctly); masked text is trivially
+    /// LTR so the bidi path is inert. Defaults to [`TextCtx::LTR`].
+    pub ctx: TextCtx,
 }
 
 /// Render one line of `text` into the first row of `rect`, scrolling horizontally so
@@ -182,27 +186,35 @@ pub fn render_field(
     let width = rect.width;
     let cursor = cursor.min(text.len());
 
-    // Measure each grapheme's start column and width; locate the cursor column.
+    // Placed cells in VISUAL order: (start column, symbol, width), plus the cursor's
+    // visual column. Masked text is one column per grapheme in logical order (a mask
+    // is direction-agnostic); unmasked text goes through the bidi shaper so RTL and
+    // mixed content read correctly, with digits shaped for display.
     let mut placed: Vec<(u16, String, u16)> = Vec::new();
     let mut col = 0u16;
-    let mut cursor_col = 0u16;
-    for (byte, g) in text.grapheme_indices(true) {
-        let w = match opts.mask {
-            Some(_) => 1,
-            None => UnicodeWidthStr::width(g).min(2) as u16,
-        };
-        if byte < cursor {
-            cursor_col += w;
+    let cursor_col;
+    if let Some(m) = opts.mask {
+        let mut cur = 0u16;
+        for (byte, _g) in text.grapheme_indices(true) {
+            if byte < cursor {
+                cur += 1;
+            }
+            placed.push((col, m.to_string(), 1));
+            col += 1;
         }
-        if w == 0 {
-            continue; // zero-width (control) cluster: occupies no column
+        cursor_col = cur;
+    } else {
+        let line = shape_line(text, 0, opts.ctx.base);
+        for cell in &line.cells {
+            let w = cell.width as u16;
+            if w == 0 {
+                continue; // zero-width cluster: occupies no column
+            }
+            let sym = shape_digits(&cell.symbol, opts.ctx.digits).into_owned();
+            placed.push((col, sym, w));
+            col += w;
         }
-        let sym = match opts.mask {
-            Some(m) => m.to_string(),
-            None => g.to_string(),
-        };
-        placed.push((col, sym, w));
-        col += w;
+        cursor_col = caret_visual_col(text, cursor, opts.ctx);
     }
     let total_cols = col;
 
@@ -297,6 +309,7 @@ mod tests {
             style: Style::default(),
             cursor_style: Style::default().bg(Color::Cyan),
             mask,
+            ctx: TextCtx::LTR,
         }
     }
 
@@ -326,5 +339,28 @@ mod tests {
         let (_row, cx) = render("", 0, &mut scroll, 6, &opts(None));
         assert_eq!(cx, 0);
         assert_eq!(scroll, 0);
+    }
+
+    fn draw_ctx(text: &str, w: u16, ctx: TextCtx) -> Vec<String> {
+        let mut term = Terminal::new(TestBackend::new(w, 1)).unwrap();
+        let mut scroll = 0;
+        let o = FieldRender { style: Style::default(), cursor_style: Style::default().bg(Color::Cyan), mask: None, ctx };
+        term.draw(|buf| render_field(buf, Rect::new(0, 0, w, 1), text, 0, &mut scroll, &o)).unwrap();
+        (0..w).map(|x| term.backend().buffer().get(x, 0).symbol.clone()).collect()
+    }
+
+    #[test]
+    fn renders_rtl_in_visual_order() {
+        // Logical "אבג" (aleph-bet-gimel) displays right-to-left as גבא.
+        let row = draw_ctx("אבג", 6, TextCtx::rtl());
+        assert_eq!(&row[0..3], &["ג", "ב", "א"]);
+    }
+
+    #[test]
+    fn shapes_digits_for_display() {
+        use crate::text::{BaseDirection, DigitShaping};
+        let ctx = TextCtx { base: BaseDirection::Ltr, digits: DigitShaping::ArabicIndic };
+        let row = draw_ctx("42", 4, ctx);
+        assert_eq!(&row[0..2], &["٤", "٢"]);
     }
 }
