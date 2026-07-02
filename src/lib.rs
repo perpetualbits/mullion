@@ -109,8 +109,8 @@ pub use vlist::{render_scrollbar, ScrollMetrics, VirtualList};
 pub use zoom::{lerp_rect, FocusTarget, Lod, LodScale, Zoom};
 pub use table::{ColumnDef, ColumnGrid, ColumnKind, Table};
 pub use text::{
-    render_line, render_wrapped, shape_line, wrap, wrap_into_slots, BaseDirection, CursorMap,
-    VisualCell, VisualLine, WrappedText,
+    render_line, render_wrapped, shape_digits, shape_line, wrap, wrap_into_slots, BaseDirection,
+    CursorMap, DigitShaping, TextCtx, VisualCell, VisualLine, WrappedText,
 };
 pub use style::{Color, ColorDepth, Modifier, Style};
 pub use theme::Theme;

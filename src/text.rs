@@ -91,6 +91,75 @@ impl BaseDirection {
     }
 }
 
+// ── TextCtx ────────────────────────────────────────────────────────────────
+
+/// How ASCII digits `0`–`9` are shaped for **display** (never mutates stored text).
+///
+/// Arabic-Indic and Extended Arabic-Indic digits are all width-1, so shaping
+/// preserves display width — safe to apply *after* width/column math.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DigitShaping {
+    /// Western digits, verbatim (the default).
+    #[default]
+    None,
+    /// Arabic-Indic digits ٠١٢٣٤٥٦٧٨٩ (U+0660…), used across the Arabic script.
+    ArabicIndic,
+    /// Extended Arabic-Indic digits ۰۱۲۳۴۵۶۷۸۹ (U+06F0…), for Persian/Urdu.
+    ExtendedArabicIndic,
+}
+
+/// A cheap, `Copy` locale/direction context the app threads into the chrome and
+/// edit primitives, so one decision reaches labels, fields, tables, truncation and
+/// digit shaping without a direction argument at every call site.
+///
+/// mullion holds no copy of it — it is a value passed by argument, the same
+/// category as [`Style`](crate::style::Style). It pairs a base [`BaseDirection`]
+/// (for bidi shaping and layout mirroring) with a [`DigitShaping`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct TextCtx {
+    /// Base paragraph direction for bidi shaping and RTL layout mirroring.
+    pub base: BaseDirection,
+    /// Display-only digit shaping.
+    pub digits: DigitShaping,
+}
+
+impl TextCtx {
+    /// Left-to-right, Western digits — the default.
+    pub const LTR: TextCtx = TextCtx { base: BaseDirection::Ltr, digits: DigitShaping::None };
+
+    /// Right-to-left, Western digits (set [`digits`](TextCtx::digits) as needed).
+    pub fn rtl() -> Self {
+        Self { base: BaseDirection::Rtl, ..Self::LTR }
+    }
+}
+
+/// Substitute ASCII digits per `shaping`, borrowing unchanged when there is nothing
+/// to shape — so the common `None`/no-digit path never allocates.
+///
+/// Shaped digits are width-1, so the result has identical display width: apply this
+/// *after* any column/width computation, never before.
+pub fn shape_digits(s: &str, shaping: DigitShaping) -> std::borrow::Cow<'_, str> {
+    let base = match shaping {
+        DigitShaping::None => return std::borrow::Cow::Borrowed(s),
+        DigitShaping::ArabicIndic => 0x0660u32,
+        DigitShaping::ExtendedArabicIndic => 0x06F0u32,
+    };
+    if !s.bytes().any(|b| b.is_ascii_digit()) {
+        return std::borrow::Cow::Borrowed(s);
+    }
+    let shaped = s
+        .chars()
+        .map(|c| {
+            if c.is_ascii_digit() {
+                char::from_u32(base + (c as u32 - '0' as u32)).unwrap_or(c)
+            } else {
+                c
+            }
+        })
+        .collect();
+    std::borrow::Cow::Owned(shaped)
+}
+
 // ── VisualCell ───────────────────────────────────────────────────────────────
 
 /// One grapheme cluster positioned in **visual** (display) order.
@@ -730,6 +799,19 @@ mod tests {
         assert_eq!(w.line_count(), 2);
         assert_eq!(visual_string(&w.lines()[0]), "ab");
         assert_eq!(visual_string(&w.lines()[1]), "cd");
+    }
+
+    #[test]
+    fn shape_digits_substitutes_and_borrows_when_idle() {
+        use std::borrow::Cow;
+        // No shaping, or no digits present → borrow, no allocation.
+        assert!(matches!(shape_digits("42", DigitShaping::None), Cow::Borrowed(_)));
+        assert!(matches!(shape_digits("abc", DigitShaping::ArabicIndic), Cow::Borrowed(_)));
+        // Substitution is width-preserving (each digit → one width-1 codepoint).
+        assert_eq!(shape_digits("42", DigitShaping::ArabicIndic), "٤٢");
+        assert_eq!(shape_digits("7", DigitShaping::ExtendedArabicIndic), "۷");
+        // Non-digits pass through untouched.
+        assert_eq!(shape_digits("v1.0", DigitShaping::ArabicIndic), "v١.٠");
     }
 
     #[test]
