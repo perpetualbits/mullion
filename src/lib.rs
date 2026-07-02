@@ -86,7 +86,7 @@ pub use backend::{Backend, CrosstermBackend, TestBackend};
 pub use label::{draw_label, label_period, Align, Anchor, Label, Side};
 pub use border::{draw_box, frame_tiles, render_rim, render_shared, BorderGap, BorderStyle, Borders, CornerStyle, LineWeight};
 pub use buffer::{Buffer, Cell};
-pub use edit::{line_edit, render_field, FieldRender};
+pub use edit::{line_edit, render_field, render_textarea, textarea_edit, FieldRender};
 pub use geometry::{mirror_rects_in, visible_window, Rect};
 pub use diff::{diff_lines, render_diff_unified, DiffOp};
 pub use form::{focus_step, render_validity, FormLayout, FormRow, Validity};

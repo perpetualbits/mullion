@@ -26,7 +26,9 @@ use crate::buffer::{Buffer, Cell};
 use crate::geometry::{visible_window, Rect};
 use crate::input::KeyCode;
 use crate::style::Style;
-use crate::text::{caret_visual_col, shape_digits, shape_line, TextCtx};
+use crate::text::{
+    caret_from_visual_col, caret_visual_col, render_line, shape_digits, shape_line, wrap, TextCtx,
+};
 
 // ── line_edit ───────────────────────────────────────────────────────────────────
 
@@ -246,6 +248,134 @@ pub fn render_field(
     }
 }
 
+// ── textarea (round-2 B1) ─────────────────────────────────────────────────────
+
+/// Locate `cursor`'s wrapped-line index and visual column for `width`/`ctx`.
+fn locate(text: &str, cursor: usize, width: u16, ctx: TextCtx) -> (usize, u16) {
+    let wrapped = wrap(text, width.max(1), ctx.base);
+    let lines = wrapped.lines();
+    if lines.is_empty() {
+        return (0, 0);
+    }
+    // The caret at a line's trailing edge (e.g. just before a hard `\n`) belongs to
+    // that line, so match on the inclusive range and take the first such line.
+    let li = lines
+        .iter()
+        .position(|l| cursor >= l.source.start && cursor <= l.source.end)
+        .unwrap_or(lines.len() - 1);
+    let line = &lines[li];
+    let ltext = &text[line.source.clone()];
+    let local = cursor.saturating_sub(line.source.start).min(ltext.len());
+    (li, caret_visual_col(ltext, local, ctx))
+}
+
+/// Move the cursor vertically by `delta` wrapped lines, keeping the visual column,
+/// returning the new byte cursor (or `None` at the top/bottom edge).
+fn vert(text: &str, cursor: usize, width: u16, ctx: TextCtx, delta: isize) -> Option<usize> {
+    let (li, col) = locate(text, cursor, width, ctx);
+    let wrapped = wrap(text, width.max(1), ctx.base);
+    let lines = wrapped.lines();
+    let target = li as isize + delta;
+    if target < 0 || target as usize >= lines.len() {
+        return None;
+    }
+    let tl = &lines[target as usize];
+    let ttext = &text[tl.source.clone()];
+    Some(tl.source.start + caret_from_visual_col(ttext, col, ctx))
+}
+
+/// Apply one editing key to caller-owned multi-line `text`/`cursor`, returning
+/// `true` when state changed. The multi-line sibling of [`line_edit`]:
+///
+/// | Key | Effect |
+/// |---|---|
+/// | [`Char`](KeyCode::Char) | insert the character |
+/// | [`Enter`](KeyCode::Enter) | insert a newline |
+/// | [`Backspace`](KeyCode::Backspace) / [`Delete`](KeyCode::Delete) | delete a grapheme (across line joins) |
+/// | [`Left`](KeyCode::Left) / [`Right`](KeyCode::Right) | move one grapheme (logical order) |
+/// | [`Up`](KeyCode::Up) / [`Down`](KeyCode::Down) | move one **wrapped** line, keeping the visual column |
+/// | [`Home`](KeyCode::Home) / [`End`](KeyCode::End) | start / end of the current wrapped line |
+///
+/// `width` is required because `Up`/`Down`/`Home`/`End` are defined on the *wrapped*
+/// layout. Motion at an edge returns `false` so a form can re-route the key. The app
+/// owns the `String`, the byte cursor, and (for [`render_textarea`]) the scroll top;
+/// there is no retained widget state.
+pub fn textarea_edit(text: &mut String, cursor: &mut usize, key: KeyCode, width: u16, ctx: TextCtx) -> bool {
+    let c = floor_boundary(text, (*cursor).min(text.len()));
+    *cursor = c;
+    match key {
+        KeyCode::Char(ch) => { text.insert(c, ch); *cursor = c + ch.len_utf8(); true }
+        KeyCode::Enter => { text.insert(c, '\n'); *cursor = c + 1; true }
+        KeyCode::Backspace => {
+            if c == 0 { return false; }
+            let p = prev_boundary(text, c);
+            text.replace_range(p..c, "");
+            *cursor = p;
+            true
+        }
+        KeyCode::Delete => {
+            if c >= text.len() { return false; }
+            let n = next_boundary(text, c);
+            text.replace_range(c..n, "");
+            *cursor = c;
+            true
+        }
+        KeyCode::Left => { if c == 0 { false } else { *cursor = prev_boundary(text, c); true } }
+        KeyCode::Right => { if c >= text.len() { false } else { *cursor = next_boundary(text, c); true } }
+        KeyCode::Home => {
+            let (li, _) = locate(text, c, width, ctx);
+            let start = wrap(text, width.max(1), ctx.base).lines()[li].source.start;
+            if start == c { false } else { *cursor = start; true }
+        }
+        KeyCode::End => {
+            let (li, _) = locate(text, c, width, ctx);
+            let end = wrap(text, width.max(1), ctx.base).lines()[li].source.end;
+            let end = floor_boundary(text, end.min(text.len()));
+            if end == c { false } else { *cursor = end; true }
+        }
+        KeyCode::Up => match vert(text, c, width, ctx, -1) { Some(n) => { *cursor = n; true } None => false },
+        KeyCode::Down => match vert(text, c, width, ctx, 1) { Some(n) => { *cursor = n; true } None => false },
+        _ => false,
+    }
+}
+
+/// Render wrapped `text` into `area` with vertical scroll-to-cursor (the row holding
+/// `cursor` is kept visible via the caller-owned `scroll_top`) and the cursor cell
+/// styled. Each line is shaped by [`wrap`](crate::text::wrap), so RTL/mixed content
+/// reads correctly. [`FieldRender::mask`] is ignored (a textarea is not a password).
+pub fn render_textarea(
+    buf:        &mut Buffer,
+    area:       Rect,
+    text:       &str,
+    cursor:     usize,
+    scroll_top: &mut usize,
+    opts:       &FieldRender,
+) {
+    if area.is_empty() {
+        return;
+    }
+    let w = area.width;
+    let cursor = cursor.min(text.len());
+    let wrapped = wrap(text, w, opts.ctx.base);
+    let lines = wrapped.lines();
+    let (cur_line, cur_col) = locate(text, cursor, w, opts.ctx);
+
+    let vis = area.height as usize;
+    let view = visible_window(cur_line, scroll_top, lines.len().max(1), vis);
+
+    buf.fill(area, Cell::new(" ", opts.style));
+    for (row, li) in (view.start..view.end).enumerate() {
+        let y = area.y + row as u16;
+        render_line(buf, area.x, y, &lines[li], w, opts.style);
+        if li == cur_line && cur_col < w {
+            let cx = area.x + cur_col;
+            let sym = buf.get(cx, y).symbol.clone();
+            let sym = if sym.is_empty() { " ".to_string() } else { sym };
+            buf.set_grapheme(cx, y, &sym, opts.cursor_style);
+        }
+    }
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -347,6 +477,30 @@ mod tests {
         let o = FieldRender { style: Style::default(), cursor_style: Style::default().bg(Color::Cyan), mask: None, ctx };
         term.draw(|buf| render_field(buf, Rect::new(0, 0, w, 1), text, 0, &mut scroll, &o)).unwrap();
         (0..w).map(|x| term.backend().buffer().get(x, 0).symbol.clone()).collect()
+    }
+
+    #[test]
+    fn textarea_edits_and_moves_between_wrapped_lines() {
+        let mut t = String::new();
+        let mut c = 0;
+        for ch in "ab".chars() { textarea_edit(&mut t, &mut c, KeyCode::Char(ch), 10, TextCtx::LTR); }
+        textarea_edit(&mut t, &mut c, KeyCode::Enter, 10, TextCtx::LTR);
+        for ch in "cd".chars() { textarea_edit(&mut t, &mut c, KeyCode::Char(ch), 10, TextCtx::LTR); }
+        assert_eq!(t, "ab\ncd");
+        assert_eq!(c, 5);
+        // Up keeps the column, landing at the end of "ab" on the first line.
+        assert!(textarea_edit(&mut t, &mut c, KeyCode::Up, 10, TextCtx::LTR));
+        assert_eq!(&t[..c], "ab");
+        // Home → start of the line; Up at the top edge is a no-op.
+        textarea_edit(&mut t, &mut c, KeyCode::Home, 10, TextCtx::LTR);
+        assert_eq!(c, 0);
+        assert!(!textarea_edit(&mut t, &mut c, KeyCode::Up, 10, TextCtx::LTR));
+        // Down → the "cd" line at column 0.
+        assert!(textarea_edit(&mut t, &mut c, KeyCode::Down, 10, TextCtx::LTR));
+        assert_eq!(&t[c..], "cd");
+        // Backspace across the line join removes the newline.
+        textarea_edit(&mut t, &mut c, KeyCode::Backspace, 10, TextCtx::LTR);
+        assert_eq!(t, "abcd");
     }
 
     #[test]
