@@ -1446,6 +1446,63 @@ never decodes video itself).
 
 ---
 
+### 3.29 Multilingual & admin-tool primitives (round 2)
+
+A set of stateless primitives for **full-featured, multilingual, bidirectional**
+admin/CRUD TUIs (census's LDAP admin, Astron's AAA/OIDC tooling). They extend the
+bidi *text* engine (§3.16) into the *edit* and *chrome* layer that dialogs and forms
+live in, and add the recurring admin boilerplate. All are stateless: the app keeps
+its `String`/cursor/focus/scroll; mullion contributes correctness + a render pass.
+
+**Locale context.** [`TextCtx`](crate::text::TextCtx) is a `Copy` value (base
+[`BaseDirection`] + [`DigitShaping`]) threaded into the primitives below — the same
+category as [`Style`]. [`shape_digits`](crate::text::shape_digits) is a
+width-preserving ASCII→Arabic-Indic digit transform.
+
+**Bidi single-line fields.** The caret is a logical byte index but moves *visually*:
+[`visual_step`](crate::text::visual_step) steps one grapheme left/right in visual
+order via the [`CursorMap`], with [`caret_visual_col`](crate::text::caret_visual_col)
+/ [`caret_from_visual_col`](crate::text::caret_from_visual_col) for render and click.
+[`render_field`](crate::edit::render_field) now lays text out through
+[`shape_line`](crate::text::shape_line) (RTL/mixed render correctly) — `FieldRender`
+carries a `ctx` (breaking, pre-1.0).
+
+**Direction-aware truncation & tables.** [`elide`](crate::text::elide) truncates to a
+column budget grapheme/width-correctly with a direction-aware `…`;
+`ColumnGrid::write_text` routes through `shape_line`+`elide`, and
+`ColumnGrid::write_text_ctx` carries a base direction — so table cells are bidi-correct.
+
+**RTL layout mirroring** (pure geometry): [`Align::resolve`](crate::label::Align::resolve)
+→ [`Anchor`], [`scrollbar_side`](crate::vlist::scrollbar_side),
+[`mirror_rects_in`](crate::geometry::mirror_rects_in), `ColumnGrid::mirrored`.
+
+**Multi-line editing.** [`textarea_edit`](crate::edit::textarea_edit) is `line_edit`
+in two dimensions (Up/Down over wrapped lines keeping the visual column; Enter inserts
+`\n`); [`render_textarea`](crate::edit::render_textarea) is the scroll-to-cursor bidi
+render. For OIDC JSON, SSH keys, PEM certs, LDIF bodies.
+
+**Selection & copy.** [`selection_step`](crate::text::selection_step) moves the caret
+end; [`render_line_selected`](crate::text::render_line_selected) highlights the cells
+whose `source_byte` lies in the logical range (a direction-crossing selection lights
+the correct, possibly discontiguous, visual span). `CrosstermBackend::copy_to_clipboard`
+emits OSC 52.
+
+**Forms.** [`FormLayout::rows`](crate::form::FormLayout) resolves `label|field|status`
+rects per row (RTL-mirrored); [`focus_step`](crate::form::focus_step) is tab-order
+arithmetic; [`render_validity`](crate::form::render_validity) draws a themed
+ok/warn/error marker.
+
+**Chrome.** [`render_keyhints`](crate::panel::render_keyhints) lays a themed
+`key label · …` command/footer bar with elision. [`tree_prefix`](crate::outline::tree_prefix)
+/ [`render_tree_row`](crate::outline::render_tree_row) draw an indented outline row
+(guides `│ ├─ └─ ▸ ▾`) for a DIT / role hierarchy.
+
+**Diff.** [`diff_lines`](crate::diff::diff_lines) is an LCS line diff over `&[&str]`;
+[`render_diff_unified`](crate::diff::render_diff_unified) paints the `+`/`-`/` ` gutter
+with ok/error/dim colours — census's LDIF change preview, AAA config diffs.
+
+---
+
 ## 4. API reference by module
 
 | Module | Key items |

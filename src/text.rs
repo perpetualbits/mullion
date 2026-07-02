@@ -880,7 +880,7 @@ fn floor_boundary(boundaries: &[usize], cursor: usize) -> usize {
 /// cursor, or `None` at the visual edge — the same "fell off the end" signal
 /// [`line_edit`](crate::edit::line_edit) gives, so a form can move focus.
 ///
-/// The caret follows the visual column order from [`caret_cols`]: in a pure-LTR
+/// The caret follows the visual column order from `caret_cols`: in a pure-LTR
 /// line this matches logical motion, in a pure-RTL line it is mirrored, and in
 /// mixed text it steps to the visually adjacent boundary. `Up`/`Down` are not
 /// handled here (return `None`).

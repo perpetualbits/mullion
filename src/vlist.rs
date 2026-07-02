@@ -286,8 +286,8 @@ pub struct ScrollMetrics {
 /// behind the thumb.
 ///
 /// Which gutter a vertical scrollbar occupies for a base direction (§round-2 A5):
-/// [`Side::Left`] under RTL, [`Side::Right`] otherwise — so the bar sits on the
-/// trailing edge of the reading direction.
+/// [`Left`](crate::label::Side::Left) under RTL, [`Right`](crate::label::Side::Right)
+/// otherwise — so the bar sits on the trailing edge of the reading direction.
 pub fn scrollbar_side(base: crate::text::BaseDirection) -> crate::label::Side {
     match base {
         crate::text::BaseDirection::Rtl => crate::label::Side::Left,
