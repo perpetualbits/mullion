@@ -90,7 +90,7 @@ pub use edit::{line_edit, render_field, render_textarea, textarea_edit, FieldRen
 pub use geometry::{mirror_rects_in, visible_window, Rect};
 pub use diff::{diff_lines, render_diff_unified, DiffOp};
 pub use form::{focus_step, render_validity, FormLayout, FormRow, Validity};
-pub use outline::{render_tree_row, tree_prefix};
+pub use outline::{render_more_row, render_tree_row, tree_prefix};
 pub use panel::{draw_panel, render_keyhints, Panel};
 pub use input::{InputRouter, Keymap, KeyCode, KeyEvent, KeyModifiers, KeyOutcome, MouseButton, MouseEvent, MouseEventKind, MouseOutcome, NavCommand};
 pub use mouse::{carousel_at, tile_at};

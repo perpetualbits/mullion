@@ -60,6 +60,9 @@ pub struct VirtualList<S: RecordSource> {
     at_top: bool,
     /// `true` when the last row of `rows` is the source's last (cannot page down).
     at_bottom: bool,
+    /// The selected row's key — a cursor anchored to a **key**, not a window index,
+    /// so it survives the window's trim/refill. `None` only for an empty source.
+    selected_key: Option<S::Key>,
 }
 
 impl<S: RecordSource> VirtualList<S> {
@@ -88,10 +91,13 @@ impl<S: RecordSource> VirtualList<S> {
             batch,
             at_top: true, // we started at the very beginning
             at_bottom: first.reached_boundary,
+            selected_key: None,
         };
         // A source may hand back fewer than asked without reaching the end; make
         // sure the viewport is filled if more rows exist.
         list.fill_below();
+        // A fresh list selects its first row — every admin list opens with a cursor.
+        list.selected_key = list.rows.first().map(|r| list.source.key_of(r));
         list
     }
 
@@ -256,6 +262,195 @@ impl<S: RecordSource> VirtualList<S> {
     }
 }
 
+// ── Selection (key-anchored cursor) ────────────────────────────────────────────
+
+/// A key-anchored **selection cursor** on top of the scroll window.
+///
+/// Selection-driven admin lists (an LDAP user list, an IP table) move a highlighted
+/// row with `j`/`k` and act on it with Enter, rather than wheel-scrolling. The
+/// selection cannot be a window index because the window trims and refills as it
+/// scrolls, so it is anchored to the row's **key** and stays valid across refills.
+/// `select_next`/`select_prev` move it, pulling the adjacent window in with the same
+/// `fetch_after`/`fetch_before` the scroll path uses so the cursor never leaves the
+/// materialized window, and keep it inside the viewport (the
+/// [`visible_window`](crate::visible_window) policy applied to the key-anchored
+/// cursor). Requires the key to be comparable and cloneable.
+impl<S: RecordSource> VirtualList<S>
+where
+    S::Key: Clone + PartialEq,
+{
+    /// The selected row's key, if any. Selection is by **key** (stable across window
+    /// trim/refill), never a window index.
+    pub fn selected_key(&self) -> Option<&S::Key> {
+        self.selected_key.as_ref()
+    }
+
+    /// The window index of the selected row, if it is currently materialized.
+    fn selected_index(&self) -> Option<usize> {
+        let key = self.selected_key.as_ref()?;
+        self.rows.iter().position(|r| self.source.key_of(r) == *key)
+    }
+
+    /// The selected row itself, if it is in the materialized window.
+    pub fn selected(&self) -> Option<&S::Row> {
+        self.selected_index().map(|i| &self.rows[i])
+    }
+
+    /// The selected row's offset within [`visible`](VirtualList::visible), for
+    /// drawing the highlight — `None` when the selection is outside the viewport.
+    pub fn selected_visible_row(&self) -> Option<usize> {
+        let i = self.selected_index()?;
+        (i >= self.view_top && i < self.view_top + self.viewport).then_some(i - self.view_top)
+    }
+
+    /// Move the selection one row **down**, fetching across the window's bottom edge
+    /// as needed and keeping the selected row in the viewport.
+    ///
+    /// Returns `false` at the source's last row (so a form can move focus onward),
+    /// mirroring `line_edit`/`textarea_edit`.
+    pub fn select_next(&mut self) -> bool {
+        let Some(idx) = self.selected_index() else {
+            return self.anchor_selection_top();
+        };
+        // Need a row after `idx`. If it is the window's tail, force one batch in.
+        if idx + 1 >= self.rows.len() {
+            if self.at_bottom {
+                return false;
+            }
+            self.force_fetch_below();
+            if idx + 1 >= self.rows.len() {
+                return false; // source ended exactly here
+            }
+        }
+        self.selected_key = Some(self.source.key_of(&self.rows[idx + 1]));
+        self.keep_selection_in_view();
+        true
+    }
+
+    /// Move the selection one row **up** — symmetric to [`select_next`](VirtualList::select_next).
+    pub fn select_prev(&mut self) -> bool {
+        let Some(idx) = self.selected_index() else {
+            return self.anchor_selection_top();
+        };
+        if idx == 0 {
+            if self.at_top {
+                return false;
+            }
+            self.force_fetch_above(); // prepends; the old row 0 shifts down
+            let Some(idx) = self.selected_index() else { return false };
+            if idx == 0 {
+                return false; // nothing actually came in
+            }
+            self.selected_key = Some(self.source.key_of(&self.rows[idx - 1]));
+        } else {
+            self.selected_key = Some(self.source.key_of(&self.rows[idx - 1]));
+        }
+        self.keep_selection_in_view();
+        true
+    }
+
+    /// Move the selection by `delta` rows (`+` down, `−` up), clamped at the source
+    /// boundary. Returns `false` when it could not move at all (already at the end).
+    pub fn select_page(&mut self, delta: isize) -> bool {
+        if delta == 0 {
+            return false;
+        }
+        let mut moved = false;
+        for _ in 0..delta.unsigned_abs() {
+            let stepped = if delta > 0 { self.select_next() } else { self.select_prev() };
+            if stepped {
+                moved = true;
+            } else {
+                break; // hit the boundary
+            }
+        }
+        moved
+    }
+
+    /// Seek so `key` is selected and visible (jump-to). No-op if `key` is absent.
+    ///
+    /// How: fetch one row *before* `key` to find its predecessor, then fetch forward
+    /// from that predecessor — that window begins with `key` itself when it exists.
+    /// If it does not (the first fetched key differs), nothing changes.
+    pub fn select_key(&mut self, key: &S::Key) {
+        let before = self.source.fetch_before(Some(key.clone()), 1);
+        let window = match before.rows.last() {
+            Some(r) => {
+                let pk = self.source.key_of(r);
+                self.source.fetch_after(Some(pk), self.capacity)
+            }
+            None => self.source.fetch_after(None, self.capacity),
+        };
+        if window.rows.first().map(|r| self.source.key_of(r)).as_ref() != Some(key) {
+            return; // `key` is not in the source
+        }
+        self.at_top = before.rows.is_empty(); // no predecessor ⇒ it is the first row
+        self.at_bottom = window.reached_boundary;
+        self.rows = window.rows;
+        self.view_top = 0;
+        self.selected_key = Some(key.clone());
+        self.fill_below();
+        self.clamp_bottom();
+    }
+
+    /// Select the window's top row — used to recover a selection that scrolling has
+    /// pushed out of the materialized window.
+    fn anchor_selection_top(&mut self) -> bool {
+        match self.rows.first() {
+            Some(r) => {
+                self.selected_key = Some(self.source.key_of(r));
+                self.keep_selection_in_view();
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Slide the viewport the minimum needed to show the selected row, then keep the
+    /// window filled and within capacity. Trims from whichever end has slack; never
+    /// drops a visible or selected row (both lie inside the viewport afterwards).
+    fn keep_selection_in_view(&mut self) {
+        if let Some(idx) = self.selected_index() {
+            crate::geometry::visible_window(idx, &mut self.view_top, self.rows.len(), self.viewport);
+        }
+        self.fill_below();
+        self.clamp_bottom();
+        self.trim_front();
+        self.trim_back();
+    }
+
+    /// Force one batch of rows in from below even if the viewport is already covered
+    /// — used to step the selection past the window's materialized tail.
+    fn force_fetch_below(&mut self) {
+        let Some(r) = self.rows.last() else { return };
+        let last = self.source.key_of(r);
+        let w = self.source.fetch_after(Some(last), self.batch);
+        self.at_bottom = w.reached_boundary;
+        if w.rows.is_empty() {
+            self.at_bottom = true;
+        } else {
+            self.rows.extend(w.rows);
+        }
+    }
+
+    /// Force one batch of rows in from above (prepending), shifting `view_top` down.
+    fn force_fetch_above(&mut self) {
+        let Some(r) = self.rows.first() else { return };
+        let first = self.source.key_of(r);
+        let w = self.source.fetch_before(Some(first), self.batch);
+        self.at_top = w.reached_boundary;
+        let added = w.rows.len();
+        if added == 0 {
+            self.at_top = true;
+        } else {
+            let mut prefixed = w.rows;
+            prefixed.append(&mut self.rows);
+            self.rows = prefixed;
+            self.view_top += added;
+        }
+    }
+}
+
 // ── ScrollMetrics ────────────────────────────────────────────────────────────
 
 /// The scrollbar geometry derived from a [`VirtualList`], plus its honesty flag.
@@ -269,6 +464,27 @@ pub struct ScrollMetrics {
     /// `true` when the source reported an exact length: the thumb is a true
     /// ordinal. `false` means position is an estimate and must be shown as one.
     pub exact: bool,
+}
+
+impl ScrollMetrics {
+    /// Metrics for a plain, fully in-memory list of `total` rows showing `viewport`
+    /// rows from `offset` — the common non-virtualized case (a `ListCursor` +
+    /// [`visible_window`](crate::visible_window) screen), as a one-liner.
+    ///
+    /// Always [`exact`](ScrollMetrics::exact): an in-memory list knows its length.
+    /// `position = offset / total`, `extent = viewport / total`, both clamped to
+    /// `[0, 1]`; an empty list yields a full thumb at the top.
+    #[must_use]
+    pub fn from_window(offset: usize, viewport: usize, total: usize) -> ScrollMetrics {
+        if total == 0 {
+            return ScrollMetrics { position: 0.0, extent: 1.0, exact: true };
+        }
+        ScrollMetrics {
+            position: (offset as f32 / total as f32).clamp(0.0, 1.0),
+            extent: (viewport as f32 / total as f32).clamp(0.0, 1.0),
+            exact: true,
+        }
+    }
 }
 
 // ── Scrollbar rendering ──────────────────────────────────────────────────────
@@ -422,6 +638,100 @@ mod tests {
         let est_src = VecRecordSource::new((0..100u64).map(|k| (k, ())).collect()).estimated();
         let mut est = VirtualList::new(est_src, 10, 8);
         assert!(!est.scroll_metrics().exact);
+    }
+
+    // ── Selection (R1) ────────────────────────────────────────────────────
+
+    #[test]
+    fn selection_starts_at_top() {
+        let list = VirtualList::new(source(100), 5, 4);
+        assert_eq!(list.selected_key(), Some(&0));
+        assert_eq!(list.selected().map(|(k, _)| *k), Some(0));
+        assert_eq!(list.selected_visible_row(), Some(0));
+    }
+
+    #[test]
+    fn select_next_moves_and_keeps_selection_in_viewport() {
+        let mut list = VirtualList::new(source(100), 5, 4);
+        for expected in 1..=6u64 {
+            assert!(list.select_next());
+            assert_eq!(list.selected_key(), Some(&expected));
+            let vr = list.selected_visible_row().expect("selection is visible");
+            assert!(vr < list.viewport());
+            assert_eq!(list.visible()[vr].0, expected); // that visible row IS the selection
+        }
+        // The viewport slid to keep the cursor visible (5-row viewport, cursor at 6).
+        assert!(list.visible()[0].0 > 0);
+    }
+
+    #[test]
+    fn select_prev_at_top_returns_false() {
+        let mut list = VirtualList::new(source(100), 5, 4);
+        assert!(!list.select_prev());
+        assert_eq!(list.selected_key(), Some(&0));
+    }
+
+    #[test]
+    fn select_next_stops_at_bottom() {
+        let mut list = VirtualList::new(source(3), 5, 4);
+        assert!(list.select_next()); // 0 → 1
+        assert!(list.select_next()); // 1 → 2
+        assert!(!list.select_next()); // last row: no move
+        assert_eq!(list.selected_key(), Some(&2));
+    }
+
+    #[test]
+    fn select_crosses_the_window_edge_over_a_big_source() {
+        // Far larger than capacity: stepping fetches across the edge, keeps the
+        // window bounded, and the selection stays materialized throughout.
+        let mut list = VirtualList::new(source(1000), 4, 3);
+        for _ in 0..500 {
+            assert!(list.select_next());
+            assert!(list.selected().is_some());
+            assert!(list.rows.len() <= list.capacity());
+        }
+        assert_eq!(list.selected_key(), Some(&500));
+        for _ in 0..500 {
+            assert!(list.select_prev());
+            assert!(list.rows.len() <= list.capacity());
+        }
+        assert_eq!(list.selected_key(), Some(&0));
+        assert!(list.at_top());
+    }
+
+    #[test]
+    fn select_key_jumps_and_ignores_absent() {
+        let mut list = VirtualList::new(source(1000), 5, 4);
+        list.select_key(&742);
+        assert_eq!(list.selected_key(), Some(&742));
+        assert_eq!(list.selected().map(|(k, _)| *k), Some(742));
+        assert_eq!(list.selected_visible_row(), Some(0)); // seeked to the top
+        list.select_key(&99_999); // absent
+        assert_eq!(list.selected_key(), Some(&742)); // unchanged
+    }
+
+    #[test]
+    fn select_page_moves_and_clamps() {
+        let mut list = VirtualList::new(source(100), 5, 4);
+        assert!(list.select_page(10));
+        assert_eq!(list.selected_key(), Some(&10));
+        assert!(list.select_page(-1000)); // clamps to top, but it did move
+        assert_eq!(list.selected_key(), Some(&0));
+        assert!(!list.select_page(-1)); // already at the top
+        assert!(!list.select_page(0));
+    }
+
+    // ── ScrollMetrics::from_window (R3) ────────────────────────────────────
+
+    #[test]
+    fn scroll_metrics_from_window() {
+        let m = ScrollMetrics::from_window(0, 10, 100);
+        assert!(m.exact);
+        assert!((m.position - 0.0).abs() < 1e-6);
+        assert!((m.extent - 0.1).abs() < 1e-6);
+        assert!((ScrollMetrics::from_window(90, 10, 100).position - 0.9).abs() < 1e-6);
+        // Empty list: a full thumb at the top.
+        assert_eq!(ScrollMetrics::from_window(0, 10, 0), ScrollMetrics { position: 0.0, extent: 1.0, exact: true });
     }
 
     // ── Property tests ────────────────────────────────────────────────────

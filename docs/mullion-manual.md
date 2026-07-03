@@ -924,6 +924,48 @@ let mut list = VirtualList::new(src, /* viewport */ 20, /* batch */ 32);
 for (index, addr) in list.visible() { /* only the visible rows were built */ }
 ```
 
+**Selection cursor (key-anchored).** A `VirtualList` is a scroll window; most admin
+lists are navigated by a **cursor** instead. The selection is anchored to the row's
+**key** (not a window index, which the trim/refill would invalidate) and stays valid
+across refills. `select_next`/`select_prev` move it — pulling the adjacent window in
+with the same `fetch_after`/`fetch_before` the scroll path uses, so the cursor never
+leaves the materialized window — and keep it inside the viewport. They return `false`
+at the source boundary (so a form can move focus onward), mirroring `line_edit`.
+
+```rust
+match key {
+    KeyCode::Down => { list.select_next(); }   // false → move focus to the next field
+    KeyCode::Up   => { list.select_prev(); }
+    KeyCode::Home => list.select_key(&first_key),   // jump-to (no-op if absent)
+    _ => {}
+}
+// render: highlight the selected row where it sits in the viewport
+if let Some(row) = list.selected_visible_row() { /* fill_row(highlight) at `row` */ }
+let sel: Option<&Row> = list.selected();           // the row itself, if materialized
+```
+
+This collapses a consumer's `ListCursor` + manual keep-in-view into
+`select_next()`/`selected()`/`selected_visible_row()`. `select_page(delta)` moves by
+a screenful. (Requires the key to be `Clone + PartialEq`.)
+
+**Plain (non-virtualized) lists — `ScrollMetrics::from_window`.** When a list is
+small enough to hold in memory (a `ListCursor` + `visible_window` screen), build
+the scrollbar metrics directly: `ScrollMetrics::from_window(offset, viewport, total)`
+— always exact, `position = offset/total`, `extent = viewport/total` — instead of
+hand-computing the fractions.
+
+**Virtualizing one huge tree node (outline recipe).** A flattened tree is not a
+single stable keyset, so `VirtualList` does not window a *whole* outline. But the real
+scale risk is one node with millions of children (an `ou=people`, a DNS zone). mullion
+windows **that one node** and leaves the tree to the app: keep a `VirtualList`
+(over a `RecordSource` of the node's children) per expanded huge node; when you
+flatten, emit the window's children with `render_tree_row`, and a `render_more_row`
+(a dim "… N more" affordance in the same guide column) above and/or below when the
+window doesn't reach the first/last child. The app still owns the domain tree, the
+expand-set and the selection; mullion only windows the one big node and draws the
+guides. (A retained "lazy-children outline node" model — mullion holding the tree —
+was considered and rejected: it crosses the engine/widget line.)
+
 ### 3.18 Wrapped-line virtualization — `mullion::docview`
 
 Scroll and seek through one **enormous flowed document** without re-wrapping all
@@ -1555,7 +1597,7 @@ with ok/error/dim colours — census's LDIF change preview, AAA config diffs.
 | `refine` | `score`, `refine` (greedy), `anneal` (`AnnealParams`), `LayoutScore` (`weighted`), `ScoreWeights`, `Preference`, `learn_weights` |
 | `text` | `wrap`, `wrap_into_slots`, `shape_line`, `render_wrapped`, `render_line`, `WrappedText` (`lines`, `visible`, `page`, `page_count`), `VisualLine`, `VisualCell`, `CursorMap` (`visual_to_logical`, `logical_to_visual`), `BaseDirection` |
 | `record` | `RecordSource` (`key_of`, `fetch_after`, `fetch_before`, `approx_position`, `exact_len`), `Window`, `VecRecordSource` (`new`, `estimated`), `RangeSource` (`new`, `len`, `is_empty`) |
-| `vlist` | `VirtualList` (`visible`, `scroll_by`, `set_viewport`, `scroll_metrics`, `at_top`/`at_bottom`, `capacity`), `ScrollMetrics`, `render_scrollbar` (vertical or horizontal by rect shape) |
+| `vlist` | `VirtualList` (`visible`, `scroll_by`, `set_viewport`, `scroll_metrics`, `at_top`/`at_bottom`, `capacity`; key-anchored selection: `selected`/`selected_key`/`selected_visible_row`, `select_next`/`select_prev`/`select_page`/`select_key`), `ScrollMetrics` (`from_window`), `render_scrollbar` (vertical or horizontal by rect shape) |
 | `docview` | `DocView` (`new`, `set_width`, `scroll_by`, `scroll_to_line`, `seek_to_byte`, `line_to_byte`, `byte_to_line`, `total_lines`, `line_count_hint`, `visible_lines`), `render_doc` |
 | `runaround` | `flow`, `slots_in`, `render_flow`, `Slot`, `PlacedLine` |
 | `socket` | `Socket` (`new`, `with_length`, `gap`, `rect`, `anchor`, `outward`, `attach`, `pack`), `Flow`, `bookends`, `draw_socket`, `FlowStyle` (`color`) |
@@ -1565,7 +1607,7 @@ with ok/error/dim colours — census's LDIF change preview, AAA config diffs.
 | `mouse` | `tile_at`, `carousel_at` |
 | `diff` | `diff_lines` (LCS line diff), `render_diff_unified`, `DiffOp` |
 | `form` | `FormLayout` (`rows`), `FormRow`, `Validity`, `focus_step`, `render_validity` |
-| `outline` | `render_tree_row`, `tree_prefix` |
+| `outline` | `render_tree_row`, `render_more_row` (windowed-child "… N more" affordance), `tree_prefix` |
 
 `Tree` methods worth knowing: `focus_set`/`focus_next`/`focus_prev`/`focus_first`/
 `focus_last`/`ensure_focus_valid`, `focus_dir`/`focus_dir_cross`,
@@ -2103,6 +2145,16 @@ text engine, and node graphs on top of the tiling core):
 | 10    | `mullion::graph::Viewport` — 2D pan-and-cull over a larger canvas; `project`/`is_visible` culling; exact 2-axis scrollbars (`render_scrollbar` now orientation-aware); canvas-space routes stable under pan; §3.23 manual |
 | 11    | `mullion::zoom` — semantic level-of-detail zoom: `Zoom` grows a focus tile through the solver (`Fill` weight easing), `Lod`/`LodScale` discrete thresholds, `lerp_rect`, `FocusTarget`; §3.24 manual |
 | 12    | `mullion::sugiyama` — layered (Sugiyama) auto-layout: feedback-arc-set cycle break, longest-path layers, barycenter ordering, grid-snapped coordinates written back to the `GraphCanvas`; §3.25 manual |
+
+**Admin-tool rounds (on top of the capability layer):** round 2 added the
+multilingual + admin primitives (§3.29); round 3 added row virtualization
+(`record`/`vlist`/`RangeSource`, §3.17); round 4 made virtualization
+**selection-aware** — `VirtualList` grew a key-anchored selection cursor
+(`select_next`/`select_prev`/`select_page`/`select_key`, `selected`/
+`selected_visible_row`), plus `ScrollMetrics::from_window` for plain lists and
+`outline::render_more_row` for windowing one huge tree node (§3.17). These turn the
+virtualization primitives into something a selection-driven admin TUI (census, the
+IP/DNS tool) adopts directly.
 
 **Upcoming (capability layer):** Phase 13 (deep tail, optional v2) — nesting + taps:
 a sub-tile that is itself a graph *and* a node in its parent (hierarchical layout
