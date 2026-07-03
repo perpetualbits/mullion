@@ -242,6 +242,88 @@ impl<K: Ord + Clone, V: Clone> RecordSource for VecRecordSource<K, V> {
     }
 }
 
+// ── RangeSource ────────────────────────────────────────────────────────────────
+
+/// A [`RecordSource`] over a computed range of `len` items, where each item is
+/// built **on demand** from its index by a closure.
+///
+/// Use this for large spaces whose rows are cheap to compute from an ordinal rather
+/// than stored — an IP range (`index → address`), row numbers, a synthetic list. A
+/// [`VirtualList`](crate::VirtualList) over a `RangeSource` materializes only the
+/// visible window, so a `/8` of 16,777,216 addresses costs the same to browse as a
+/// `/24`: nothing but the rows on screen is ever built.
+///
+/// The [`Key`](RecordSource::Key) is the item's `u64` **index**, and the
+/// [`Row`](RecordSource::Row) is `(index, value)` — so the value need not carry its
+/// own key. Length is known, so the scrollbar is exact.
+pub struct RangeSource<T, F> {
+    len: u64,
+    build: F,
+    _marker: std::marker::PhantomData<fn() -> T>,
+}
+
+impl<T, F: Fn(u64) -> T> RangeSource<T, F> {
+    /// A source of `len` items, each built by `build(index)` when fetched.
+    pub fn new(len: u64, build: F) -> Self {
+        Self { len, build, _marker: std::marker::PhantomData }
+    }
+
+    /// The number of items in the range.
+    pub fn len(&self) -> u64 {
+        self.len
+    }
+
+    /// `true` when the range is empty.
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+}
+
+impl<T, F: Fn(u64) -> T> RecordSource for RangeSource<T, F> {
+    type Key = u64;
+    type Row = (u64, T);
+
+    /// The index component of the `(index, value)` row.
+    fn key_of(&self, row: &(u64, T)) -> u64 {
+        row.0
+    }
+
+    /// Build the indices immediately after `key` (or from index 0), up to `n`.
+    fn fetch_after(&mut self, key: Option<u64>, n: usize) -> Window<(u64, T)> {
+        let start = match key {
+            None => 0,
+            Some(k) => k.saturating_add(1),
+        };
+        let start = start.min(self.len);
+        let end = start.saturating_add(n as u64).min(self.len);
+        let rows = (start..end).map(|i| (i, (self.build)(i))).collect();
+        Window::new(rows, end >= self.len)
+    }
+
+    /// Build up to `n` indices immediately before `key` (or the last `n`), in
+    /// ascending order.
+    fn fetch_before(&mut self, key: Option<u64>, n: usize) -> Window<(u64, T)> {
+        let end = key.unwrap_or(self.len).min(self.len);
+        let start = end.saturating_sub(n as u64);
+        let rows = (start..end).map(|i| (i, (self.build)(i))).collect();
+        Window::new(rows, start == 0)
+    }
+
+    /// Exact fractional position: `key / len` (there are `key` indices before it).
+    fn approx_position(&mut self, key: &u64) -> Option<f32> {
+        if self.len == 0 {
+            None
+        } else {
+            Some((*key).min(self.len) as f32 / self.len as f32)
+        }
+    }
+
+    /// Always exact — a computed range knows its length.
+    fn exact_len(&mut self) -> Option<u64> {
+        Some(self.len)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -334,5 +416,71 @@ mod tests {
         // Length is hidden, but position estimation still works.
         assert_eq!(s.exact_len(), None);
         assert_eq!(s.approx_position(&2), Some(0.5));
+    }
+
+    #[test]
+    fn range_source_len_and_emptiness() {
+        let s = RangeSource::new(10, |i| i * 2);
+        assert_eq!(s.len(), 10);
+        assert!(!s.is_empty());
+        assert!(RangeSource::new(0, |i| i).is_empty());
+    }
+
+    #[test]
+    fn range_source_fetches_windows_lazily() {
+        // Value = index * 10, so we can check exactly which indices were built.
+        let mut s = RangeSource::new(10, |i| i * 10);
+
+        // From the start.
+        let w = s.fetch_after(None, 3);
+        assert_eq!(w.rows, vec![(0, 0), (1, 10), (2, 20)]);
+        assert!(!w.reached_boundary);
+
+        // After a key, hitting the end (only 8,9 remain of len 10).
+        let w = s.fetch_after(Some(7), 5);
+        assert_eq!(w.rows, vec![(8, 80), (9, 90)]);
+        assert!(w.reached_boundary);
+
+        // The last n rows.
+        let w = s.fetch_before(None, 2);
+        assert_eq!(w.rows, vec![(8, 80), (9, 90)]);
+        assert!(!w.reached_boundary);
+
+        // Before a key, hitting the start.
+        let w = s.fetch_before(Some(3), 9);
+        assert_eq!(w.rows, vec![(0, 0), (1, 10), (2, 20)]);
+        assert!(w.reached_boundary);
+    }
+
+    #[test]
+    fn range_source_position_and_len() {
+        let mut s = RangeSource::new(200, |i| i);
+        assert_eq!(s.exact_len(), Some(200));
+        assert_eq!(s.approx_position(&100), Some(0.5));
+        assert_eq!(s.approx_position(&0), Some(0.0));
+    }
+
+    #[test]
+    fn range_source_over_a_slash_8_is_instant() {
+        // 10.0.0.0/8 = 16,777,216 addresses. Fetching a window near the middle must
+        // build only the requested rows — materializing all of it would hang/OOM.
+        let mut s = RangeSource::new(16_777_216, |i| i);
+        assert_eq!(s.exact_len(), Some(16_777_216));
+        let w = s.fetch_after(Some(8_000_000), 4);
+        assert_eq!(w.rows, vec![(8_000_001, 8_000_001), (8_000_002, 8_000_002), (8_000_003, 8_000_003), (8_000_004, 8_000_004)]);
+        assert!(!w.reached_boundary);
+    }
+
+    #[test]
+    fn range_source_drives_a_virtual_list() {
+        use crate::VirtualList;
+        // A million-row range, windowed by a VirtualList that only ever holds a few.
+        let source = RangeSource::new(1_000_000, |i| i);
+        let mut list = VirtualList::new(source, 5, 8);
+        assert!(list.at_top());
+        assert!(!list.visible().is_empty());
+        assert_eq!(list.visible()[0].0, 0); // first visible key is index 0
+        list.scroll_by(3); // scroll down toward later keys
+        assert_eq!(list.visible()[0].0, 3); // the window moved; key is stable under trimming
     }
 }

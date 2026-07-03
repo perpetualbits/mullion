@@ -105,7 +105,7 @@ pub use float::{
     free_cells_in_window, free_intervals_in_rows, FloatChild, FloatLayer, FloatRect, FreeInterval,
 };
 pub use graph::{GraphCanvas, Viewport};
-pub use record::{RecordSource, VecRecordSource, Window};
+pub use record::{RangeSource, RecordSource, VecRecordSource, Window};
 pub use refine::{anneal, learn_weights, refine, score, AnnealParams, LayoutScore, Preference, ScoreWeights};
 pub use route::{render as render_connectors, route, route_all, Connector, RouteRequest};
 pub use runaround::{flow, render_flow, slots_in, PlacedLine, Slot};
