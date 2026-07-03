@@ -25,6 +25,16 @@
 //! [`render_scrollbar`] honors that flag by drawing the estimate with a visibly
 //! different glyph, so the approximation is shown deliberately rather than faked.
 //!
+//! ## Selection
+//!
+//! A `VirtualList` also carries an optional **selection cursor** for the common
+//! selection-driven (not wheel-scrolled) admin list. It is anchored to the selected
+//! row's **key**, not a window index — the window trims and refills, so an index
+//! would not survive. [`select_next`](VirtualList::select_next) /
+//! [`select_prev`](VirtualList::select_prev) move it, pulling the adjacent window in
+//! and keeping it in the viewport; [`selected`](VirtualList::selected) /
+//! [`selected_visible_row`](VirtualList::selected_visible_row) read it for rendering.
+//!
 //! ## Rendering
 //!
 //! The list is content-agnostic: it owns geometry and data, not formatting. Pull
