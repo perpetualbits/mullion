@@ -233,8 +233,10 @@ impl ColumnGrid {
     /// that sub-rect).  The remaining cells to the left hold `value`,
     /// right-aligned.  Both portions may carry independent styles.
     ///
-    /// If the rect is too narrow to show the unit at all, only the value is
-    /// written (truncated if necessary).
+    /// The unit takes priority when the column is too narrow: the rightmost
+    /// `unit_cols` cells (clamped to the rect width) are always reserved for the
+    /// unit, and the value is dropped when no cells remain for it (or truncated to
+    /// whatever cells are left).
     ///
     /// ```
     /// use mullion::{Buffer, Rect};
@@ -317,9 +319,9 @@ impl ColumnGrid {
 
     /// Fill a column rect with a horizontal bar at row `y`.
     ///
-    /// Cells `0 .. ceil(fraction * width)` receive `filled_ch`/`filled_style`;
-    /// the rest receive `empty_ch`/`empty_style`.  `fraction` is clamped to
-    /// `[0, 1]`.
+    /// Cells `0 .. round(fraction * width)` (rounded to nearest) receive
+    /// `filled_ch`/`filled_style`; the rest receive `empty_ch`/`empty_style`.
+    /// `fraction` is clamped to `[0, 1]`.
     ///
     /// The optional `overlay` closure is called for each cell index
     /// `0 .. width`; when it returns `Some((ch, style))` the returned

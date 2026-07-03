@@ -273,6 +273,16 @@ pub struct ScrollMetrics {
 
 // ── Scrollbar rendering ──────────────────────────────────────────────────────
 
+/// Which gutter a vertical scrollbar occupies for a base direction (§round-2 A5):
+/// [`Left`](crate::label::Side::Left) under RTL, [`Right`](crate::label::Side::Right)
+/// otherwise — so the bar sits on the trailing edge of the reading direction.
+pub fn scrollbar_side(base: crate::text::BaseDirection) -> crate::label::Side {
+    match base {
+        crate::text::BaseDirection::Rtl => crate::label::Side::Left,
+        _ => crate::label::Side::Right,
+    }
+}
+
 /// Draw a scrollbar for `metrics` into `rect`. The **orientation follows the rect
 /// shape**: a wider-than-tall rect draws a horizontal bar (track `─`), otherwise a
 /// vertical one (track `│`) — so the same widget serves a row scrollbar and either
@@ -285,16 +295,6 @@ pub struct ScrollMetrics {
 /// track; the track is drawn in that color with a [`Modifier::DIM`] so it recedes
 /// behind the thumb.
 ///
-/// Which gutter a vertical scrollbar occupies for a base direction (§round-2 A5):
-/// [`Left`](crate::label::Side::Left) under RTL, [`Right`](crate::label::Side::Right)
-/// otherwise — so the bar sits on the trailing edge of the reading direction.
-pub fn scrollbar_side(base: crate::text::BaseDirection) -> crate::label::Side {
-    match base {
-        crate::text::BaseDirection::Rtl => crate::label::Side::Left,
-        _ => crate::label::Side::Right,
-    }
-}
-
 /// Does nothing for a zero-size rect.
 pub fn render_scrollbar(buf: &mut Buffer, rect: Rect, metrics: ScrollMetrics, style: Style) {
     if rect.height == 0 || rect.width == 0 {

@@ -27,7 +27,7 @@ pub enum Color {
     Blue,
     Magenta,
     Cyan,
-    /// Standard white (ANSI 7, appears as light grey on most terminals).
+    /// Bright white (ANSI 15, brighter than `Gray`).
     White,
     /// Bright black / dark grey (ANSI 8).
     DarkGray,
@@ -37,7 +37,7 @@ pub enum Color {
     LightBlue,
     LightMagenta,
     LightCyan,
-    /// Bright white (ANSI 15, brighter than `White`).
+    /// Standard white / light grey (ANSI 7).
     Gray,
     /// An 8-bit indexed color (0–255).
     Indexed(u8),

@@ -53,6 +53,8 @@ pub struct SugiyamaParams {
 }
 
 impl Default for SugiyamaParams {
+    /// Defaults: left-to-right layers, a 6-cell layer gap, a 2-cell node gap, and
+    /// grid step 1 (no snapping).
     fn default() -> Self {
         Self { dir: LayerDir::LeftRight, layer_gap: 6, node_gap: 2, grid: 1 }
     }

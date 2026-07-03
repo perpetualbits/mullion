@@ -70,6 +70,7 @@ pub fn leaves(root: &Node) -> Vec<TileId> {
     out
 }
 
+/// Recursive helper for [`leaves`]: appends every leaf id under `node` to `out` in DFS pre-order.
 fn collect_leaves(node: &Node, out: &mut Vec<TileId>) {
     match node {
         Node::Tile(id) => out.push(*id),
@@ -99,6 +100,7 @@ pub fn focus_path(root: &Node, id: TileId) -> Option<Vec<usize>> {
     if find_path(root, id, &mut path) { Some(path) } else { None }
 }
 
+/// Recursive helper for [`focus_path`]: builds the child-index path to `id` in `path`, returning whether it was found.
 fn find_path(node: &Node, id: TileId, path: &mut Vec<usize>) -> bool {
     match node {
         Node::Tile(tid) => *tid == id,

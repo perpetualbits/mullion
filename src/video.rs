@@ -342,6 +342,14 @@ impl Video {
             })
             .collect()
     }
+    /// Render [`Encoding::Braille`]: each cell is a 2×4 grid of Braille dots (`gw × gh`
+    /// sub-pixels), giving 8× the vertical/horizontal resolution of one character.
+    ///
+    /// One pass samples and filters every sub-pixel, keeping its luma for dithering and
+    /// accumulating each cell's 8-sub-pixel average colour. [`dither_bits`](Self::dither_bits)
+    /// then turns the luma grid into lit/unlit dots; for each cell the lit dots set the
+    /// corresponding bits of the `U+2800` Braille glyph, and the glyph is coloured by the
+    /// cell average (with a luma/chroma fg/bg split under [`Encoding::LumaChroma`]).
     fn render_braille(
         &self,
         buf: &mut Buffer,
@@ -458,6 +466,10 @@ impl Video {
         lit
     }
 
+    /// Render [`Encoding::HalfBlock`]: each cell stacks two pixels vertically as a `▀`
+    /// (upper-half-block) glyph — the top sub-pixel becomes the glyph's foreground colour
+    /// and the bottom sub-pixel its background, doubling the vertical resolution. Both
+    /// sub-pixels are sampled and filtered through [`shade`] before being written.
     fn render_half_block(
         &self,
         buf: &mut Buffer,
@@ -576,6 +588,8 @@ enum CompiledFilter {
 }
 
 impl CompiledFilter {
+    /// Apply this one compiled filter to sample `c`: a plain [`Filter`] runs as-is, a
+    /// baked phosphor filter is a luma→colour lookup.
     fn apply(&self, line: usize, u: f32, v: f32, c: Rgb) -> Rgb {
         match self {
             CompiledFilter::Simple(f) => f.apply(line, u, v, c),
@@ -611,6 +625,8 @@ struct FrameSampler<'a> {
 }
 
 impl<'a> FrameSampler<'a> {
+    /// Build a sampler for `frame`, precomputing the per-axis source taps for a `gw × gh`
+    /// output grid under the chosen [`Sampling`].
     fn new(frame: &'a Frame, gw: usize, gh: usize, sampling: Sampling) -> Self {
         let bilinear = matches!(sampling, Sampling::Bilinear);
         // The taps for output index `i` of `n_out` over a source axis of `n_in` pixels.
@@ -633,6 +649,8 @@ impl<'a> FrameSampler<'a> {
         Self { frame, xs: axis(gw, frame.width), ys: axis(gh, frame.height), bilinear }
     }
 
+    /// Sample the colour at output cell `(gx, gy)` using the precomputed taps (nearest,
+    /// or bilinear blend of the four neighbours).
     fn at(&self, gx: usize, gy: usize) -> Rgb {
         let (ax, ay) = (&self.xs[gx], &self.ys[gy]);
         let w = self.frame.width;
@@ -673,6 +691,7 @@ fn lerp_rgb(a: Rgb, b: Rgb, t: f32) -> Rgb {
     (m(a.0, b.0), m(a.1, b.1), m(a.2, b.2))
 }
 
+/// Clamp a float to `[0, 255]` and cast to a byte.
 fn clamp_u8(x: f32) -> u8 {
     x.clamp(0.0, 255.0) as u8
 }

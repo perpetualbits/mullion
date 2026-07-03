@@ -52,6 +52,7 @@ pub struct LodScale {
     pub full: u32,
 }
 
+/// Default thresholds (in cells): `titled` at 40, `ported` at 160, `full` at 360.
 impl Default for LodScale {
     fn default() -> Self {
         // Roughly: a title fits by ~14×3, ports by ~20×8, an internal graph by ~30×12.

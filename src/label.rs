@@ -320,7 +320,7 @@ fn draw_h_window(
     for _ in 0..MARQUEE_GAP {
         all.push((" ", 1));
     }
-    // Invariant: sum of all widths == _period.
+    // Invariant: ∑ all widths == period (= ∑ gws widths + MARQUEE_GAP).
 
     // Find the item whose column range [col, col+w) contains `start`, and
     // record how many leading columns of that item are before the window.

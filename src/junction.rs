@@ -39,8 +39,8 @@ use crate::{border::LineWeight, geometry::Rect};
 /// Each arm records the [`LineWeight`] of the border segment reaching the cell
 /// from that direction, or `None` when no segment is present.  Arms are set by
 /// [`EdgeGrid::add_h_line`] and [`EdgeGrid::add_v_line`]; when two segments
-/// meet in the same direction the stronger weight wins (see merge rule in
-/// [`resolve`]).
+/// meet in the same direction the stronger weight wins (see the merge rule in
+/// the private `stronger` helper).
 #[derive(Debug, Default, Clone)]
 pub struct EdgeCell {
     /// Arm connecting upward to the cell above.
@@ -86,24 +86,28 @@ impl EdgeGrid {
         (y - self.area.y) as usize * self.area.width as usize + (x - self.area.x) as usize
     }
 
+    /// Set the cell's left arm to `w`, keeping the stronger of any existing weight.
     #[inline]
     fn set_left(&mut self, x: u16, y: u16, w: LineWeight) {
         let i = self.idx(x, y);
         self.cells[i].left = Some(stronger(self.cells[i].left, w));
     }
 
+    /// Set the cell's right arm to `w`, keeping the stronger of any existing weight.
     #[inline]
     fn set_right(&mut self, x: u16, y: u16, w: LineWeight) {
         let i = self.idx(x, y);
         self.cells[i].right = Some(stronger(self.cells[i].right, w));
     }
 
+    /// Set the cell's up arm to `w`, keeping the stronger of any existing weight.
     #[inline]
     fn set_up(&mut self, x: u16, y: u16, w: LineWeight) {
         let i = self.idx(x, y);
         self.cells[i].up = Some(stronger(self.cells[i].up, w));
     }
 
+    /// Set the cell's down arm to `w`, keeping the stronger of any existing weight.
     #[inline]
     fn set_down(&mut self, x: u16, y: u16, w: LineWeight) {
         let i = self.idx(x, y);
@@ -260,6 +264,7 @@ pub fn resolve(cell: &EdgeCell) -> Option<char> {
 
 // ── Internal helpers ──────────────────────────────────────────────────────────
 
+/// Encode an arm's optional weight as 2 bits: None=0, Light=1, Heavy=2, Double=3.
 #[inline]
 fn arm_code(w: Option<LineWeight>) -> u8 {
     match w {
@@ -276,11 +281,13 @@ fn pack(up: u8, down: u8, left: u8, right: u8) -> u8 {
     (up << 6) | (down << 4) | (left << 2) | right
 }
 
+/// The lazily-built, process-lifetime-cached 256-entry Light/Heavy lookup table.
 fn lh_table() -> &'static [Option<char>; 256] {
     static T: OnceLock<[Option<char>; 256]> = OnceLock::new();
     T.get_or_init(build_lh_table)
 }
 
+/// The lazily-built, process-lifetime-cached 256-entry pure-Double lookup table.
 fn d_table() -> &'static [Option<char>; 256] {
     static T: OnceLock<[Option<char>; 256]> = OnceLock::new();
     T.get_or_init(build_d_table)

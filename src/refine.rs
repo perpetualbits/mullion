@@ -51,6 +51,9 @@ pub struct ScoreWeights {
     pub overlap: f32,
 }
 
+/// Default penalty weights, tuned so crossings and overlaps dominate while length
+/// and area act as gentle tie-breakers: `crossings: 20`, `length: 0.05`, `area:
+/// 0.002`, `alignment: 0.4`, `bends: 2`, `edge_node: 10`, `overlap: 1000`.
 impl Default for ScoreWeights {
     fn default() -> Self {
         Self {
@@ -273,6 +276,8 @@ pub struct AnnealParams {
     pub nudge: u16,
 }
 
+/// Default annealing schedule: `seed: 1`, `iters: 3000`, `start_temp: 24.0`,
+/// `end_temp: 0.4`, `nudge: 4` cells.
 impl Default for AnnealParams {
     fn default() -> Self {
         Self { seed: 1, iters: 3000, start_temp: 24.0, end_temp: 0.4, nudge: 4 }

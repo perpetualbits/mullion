@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 // Copyright (C) 2026  Epsilon Null Operation
-//! Border drawing: glyphs, [`draw_box`], and per-tile framing.
+//! Border drawing: glyphs, [`draw_box`], per-tile framing ([`frame_tiles`]),
+//! shared-border layout ([`render_shared`]), and rim animation
+//! ([`render_rim`]/[`BorderGap`]).
 //!
 //! ## Glyph vocabulary
 //!
@@ -16,13 +18,16 @@
 //! Double:           ═ ║   ╔ ╗ ╚ ╝
 //! ```
 //!
-//! Tee/cross glyphs (`├ ┤ ┬ ┴ ┼` and mixed-weight variants) are Phase 2b.
+//! Tee/cross glyphs (`├ ┤ ┬ ┴ ┼` and mixed-weight variants) are produced by
+//! shared-border mode ([`render_shared`]), where adjacent tiles meet on one
+//! shared line and the junctions resolve automatically.
 //!
 //! ## Per-tile vs. shared-border mode
 //!
 //! [`frame_tiles`] is the **per-tile mode**: every tile gets its own box.
-//! Adjacent tiles produce a doubled gutter (`┐┌` / `││` / `┘└`).  A single
-//! shared line with junction glyphs is Phase 2b.
+//! Adjacent tiles produce a doubled gutter (`┐┌` / `││` / `┘└`).
+//! [`render_shared`] is the **shared-border mode**: adjacent tiles share a
+//! single divider line and junction glyphs emerge automatically.
 //!
 //! To draw one box around a group of tiles, call [`draw_box`] on the group's
 //! bounding rect directly.
@@ -272,20 +277,15 @@ pub fn draw_box(buf: &mut Buffer, area: Rect, borders: Borders, style: &BorderSt
 /// `Borders::ALL`) yields a content rect with zero width or height.  The caller
 /// should check [`Rect::is_empty`] before rendering into the content rect.
 ///
-/// ## Phase 2 border mode
+/// ## Per-tile vs. shared-border mode
 ///
 /// This is the **per-tile mode**: each tile gets its own box.  Adjacent tiles
-/// produce a doubled gutter (`┐┌` / `││` / `┘└`).  A single shared border line
-/// with junction glyphs (`├ ┤ ┬ ┴ ┼`) is Phase 2b.
+/// produce a doubled gutter (`┐┌` / `││` / `┘└`).  For a single shared border
+/// line with junction glyphs (`├ ┤ ┬ ┴ ┼`) between adjacent tiles, use
+/// [`render_shared`] instead — that is the shared-border entry point.
 ///
 /// To draw one box around a *group* of tiles, call [`draw_box`] on the bounding
 /// rect of the group instead.
-///
-/// // NOTE: Phase 3 focus highlighting will draw the focused tile's box in a
-/// // different [`BorderStyle`] (e.g. [`LineWeight::Heavy`] or an accent colour).
-/// // Because [`draw_box`] and [`frame_tiles`] already accept the style per call,
-/// // the focus pass re-draws that one box over the base frame — no API change
-/// // anticipated.
 pub fn frame_tiles(
     buf: &mut Buffer,
     tiles: &[(TileId, Rect)],

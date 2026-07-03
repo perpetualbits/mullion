@@ -174,6 +174,7 @@ impl Keymap {
         )
     }
 
+    /// Whether `key` matches the configured prefix key.
     fn is_prefix(&self, key: &KeyEvent) -> bool {
         match &self.prefix {
             Some(p) => key.code == p.code && key.modifiers == p.modifiers,
@@ -181,6 +182,7 @@ impl Keymap {
         }
     }
 
+    /// Look up the `NavCommand` bound to `key`, if any.
     fn lookup(&self, key: &KeyEvent) -> Option<NavCommand> {
         self.bindings
             .iter()
@@ -189,6 +191,9 @@ impl Keymap {
     }
 }
 
+/// The default keymap: prefixless, with arrow keys focusing in a direction,
+/// `Shift`+arrows crossing split boundaries, `Enter` zooming in, and `Esc`
+/// zooming out.
 impl Default for Keymap {
     fn default() -> Self {
         use KeyCode::{Down, Enter, Esc, Left, Right, Up};
@@ -435,12 +440,14 @@ impl InputRouter {
     }
 }
 
+/// The default router — equivalent to `InputRouter::new()`.
 impl Default for InputRouter {
     fn default() -> Self {
         Self::new()
     }
 }
 
+/// Dispatch a decoded `NavCommand` against `tree`.
 fn execute_nav(cmd: NavCommand, tree: &mut Tree) {
     match cmd {
         NavCommand::FocusNext          => tree.focus_next(),

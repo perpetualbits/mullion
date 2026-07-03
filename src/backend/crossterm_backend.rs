@@ -186,7 +186,8 @@ impl<W: Write> CrosstermBackend<W> {
     /// Write the escape sequences that restore the terminal to its normal state.
     ///
     /// Emits (in order): `BDSM_IMPLICIT` (restore bidi on the alternate screen),
-    /// `DisableMouseCapture` (if mouse_enabled), `LeaveAlternateScreen`, `Show`
+    /// `DisableBracketedPaste`, `DisableMouseCapture` (if mouse_enabled),
+    /// `LeaveAlternateScreen`, `Show`
     /// (show cursor), then `BDSM_IMPLICIT` again (restore bidi on the primary
     /// screen — both were set explicit in `enter`).  Deliberately does **not** call
     /// `disable_raw_mode`, which is a tty syscall and therefore unavailable in
@@ -438,8 +439,10 @@ impl<W: Write> Backend for CrosstermBackend<W> {
     /// 3. Hide the cursor to prevent it from flickering over the UI.
     /// 4. Enable mouse capture (if [`mouse_enabled`](CrosstermBackend::set_mouse_capture)
     ///    is `true`) so click and scroll events are delivered.
-    /// 5. Set `entered = true` to arm the [`Drop`] guard.
-    /// 6. Install a panic hook that emits restore sequences to stderr before
+    /// 5. Enable bracketed paste so a paste arrives as one atomic `Event::Paste`
+    ///    rather than a stream of key events.
+    /// 6. Set `entered = true` to arm the [`Drop`] guard.
+    /// 7. Install a panic hook that emits restore sequences to stderr before
     ///    printing the panic message.  Without this, a panic in raw mode
     ///    produces garbled output because the terminal is still in raw mode
     ///    when the default panic handler writes to stderr.

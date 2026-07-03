@@ -78,6 +78,11 @@ pub fn diff_lines<'a>(old: &'a [&'a str], new: &'a [&'a str]) -> Vec<DiffOp<'a>>
 /// context [`theme.text_dim`](crate::Theme::text_dim). Lines are shaped through
 /// [`shape_line`](crate::text::shape_line) and elided to fit. `scroll_top` is
 /// clamped so the last screenful is never scrolled past.
+///
+/// # Parameters
+/// - `ctx`: directionality context passed on to [`shape_line`](crate::text::shape_line)
+///   and [`elide`](crate::text::elide) so each line is shaped and truncated for its base
+///   direction.
 pub fn render_diff_unified(
     buf:        &mut Buffer,
     area:       Rect,

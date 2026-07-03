@@ -16,8 +16,12 @@
 //! inside the canvas (clamping is enforced on every move). The canvas may be
 //! larger than the on-screen window that shows it; [`solve`](GraphCanvas::solve)
 //! maps canvas-local rects to absolute screen rects against a window and clips to
-//! it. This phase uses a **fixed origin** — panning a window over a larger canvas
-//! and culling off-window nodes is Phase 10.
+//! it. [`solve`](GraphCanvas::solve) itself uses a **fixed origin** — it always
+//! draws the canvas's top-left at the window origin.
+//!
+//! To pan a window over a larger canvas (with culling of off-window nodes and
+//! exact scroll metrics), wrap the canvas in a [`Viewport`], which projects
+//! canvas-space rects to screen and drops whatever falls outside.
 //!
 //! ## Hit-testing
 //!
@@ -177,8 +181,12 @@ fn clamp_in(place: FloatRect, width: u16, height: u16) -> FloatRect {
 /// put as you scroll.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Viewport {
+    /// The on-screen window rect the canvas is shown through.
     window: Rect,
+    /// The logical canvas size `(width, height)` in cells.
     canvas: (u16, u16),
+    /// The pan offset `(x, y)` in canvas cells: the canvas cell shown at the
+    /// window's top-left.
     pan: (u16, u16),
 }
 
@@ -212,6 +220,7 @@ impl Viewport {
         )
     }
 
+    /// Clamp the pan to `[0, max_pan]` on each axis.
     fn clamp(&mut self) {
         let (mx, my) = self.max_pan();
         self.pan = (self.pan.0.min(mx), self.pan.1.min(my));

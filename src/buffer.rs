@@ -193,8 +193,9 @@ impl Buffer {
     /// The x position immediately after the grapheme (or `x` for zero-width).
     ///
     /// # Invariants
-    /// `x` must be within `self.area`; `y` must be a valid row.  Out-of-bounds
-    /// `x` or `y` returns immediately without writing.
+    /// The guard returns immediately without writing when `x >= area.right()`,
+    /// `y >= area.bottom()`, or `y < area.y`.  Note it does **not** check
+    /// `x < area.x`: an `x` below the left edge is not rejected here.
     pub fn set_grapheme(&mut self, x: u16, y: u16, grapheme: &str, style: Style) -> u16 {
         // Guard: do nothing if the position is outside the buffer.
         if x >= self.area.right() || y >= self.area.bottom() || y < self.area.y {

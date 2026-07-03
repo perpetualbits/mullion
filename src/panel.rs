@@ -127,7 +127,9 @@ pub fn draw_panel(buf: &mut Buffer, area: Rect, panel: &Panel) -> Rect {
 /// [`theme.text_dim`](crate::Theme::text_dim), separated by ` · `. Every text run
 /// goes through [`shape_line`](crate::text::shape_line) so a label in any script
 /// renders correctly, and the row is truncated with `…` when it overflows. Under an
-/// RTL `ctx.base` the bar is right-aligned. Draws nothing for a zero-size rect.
+/// RTL `ctx.base` the bar is right-aligned when it fits; on overflow it is drawn from
+/// the leading edge and truncated with `…` on the right. Draws nothing for a zero-size
+/// rect.
 pub fn render_keyhints(
     buf:   &mut Buffer,
     rect:  Rect,

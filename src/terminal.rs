@@ -255,6 +255,7 @@ impl EventReader {
     }
 }
 
+/// The default reader — equivalent to `EventReader::new()`.
 impl Default for EventReader {
     fn default() -> Self {
         Self::new()

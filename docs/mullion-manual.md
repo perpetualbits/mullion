@@ -820,17 +820,19 @@ grapheme-correctly, and returns `false` for an unhandled key or an edge no-op so
 form can re-route it (Tab to the next field, arrow-at-edge to move focus).
 `render_field(buf, rect, &text, cursor, &mut scroll, &opts)` draws one line with
 horizontal scroll-to-cursor and optional masking (`FieldRender { style,
-cursor_style, mask }` — `mask: Some('•')` for passwords):
+cursor_style, mask, ctx }` — `mask: Some('•')` for passwords, `ctx` the text
+directionality context):
 
 ```rust
-use mullion::{line_edit, render_field, FieldRender};
+use mullion::{line_edit, render_field, FieldRender, TextCtx};
 
 // in the key handler — the app owns `text`, `cursor`, `scroll`:
 if !line_edit(&mut field.text, &mut field.cursor, key) { /* fell through; route it */ }
 
 // in the render pass:
 render_field(buf, field_rect, &field.text, field.cursor, &mut field.scroll,
-             &FieldRender { style: theme.text, cursor_style: theme.selection, mask: None });
+             &FieldRender { style: theme.text, cursor_style: theme.selection,
+                            mask: None, ctx: TextCtx::LTR });
 ```
 
 **List windowing.** `visible_window(cursor, &mut offset, len, viewport) ->
@@ -904,6 +906,23 @@ truth levels** (design-note §6.2): the thumb is a true ordinal when the source'
 `exact_len` returns `Some`, and an honest **estimate** (drawn with a distinct
 glyph) otherwise. Rows render through `ColumnGrid` exactly as a `Table` body does.
 Demo: `cargo run --example records`.
+
+**Computed ranges — `RangeSource`.** When the rows are cheap to *compute* from an
+ordinal rather than stored, `RangeSource::new(len, build)` is a ready-made
+`RecordSource` over a virtual `0..len`: each row is built lazily from its index by
+`build(index)` when its window is fetched. The key is the `u64` index and the row is
+`(index, value)`; length is known, so the scrollbar is exact. Nothing but the
+on-screen window is ever built, so browsing a `/8` of 16,777,216 addresses costs the
+same as a `/24`.
+
+```rust
+use mullion::{RangeSource, VirtualList};
+
+// A whole /8, built on demand — no 16M-element Vec.
+let src = RangeSource::new(16_777_216, |i| address_at(i));
+let mut list = VirtualList::new(src, /* viewport */ 20, /* batch */ 32);
+for (index, addr) in list.visible() { /* only the visible rows were built */ }
+```
 
 ### 3.18 Wrapped-line virtualization — `mullion::docview`
 
@@ -1512,7 +1531,7 @@ with ok/error/dim colours — census's LDIF change preview, AAA config diffs.
 | `ease` | `smoothstep`, `lerp`, `gaussian` |
 | `field` | `Field` (`rect`, `strip`, `perimeter`, `paint`, `render_braille`/`_xy`, `render_ramp`/`_xy`, `render_glyphs`/`_xy`), `BLOCK_RAMP`, `ASCII_RAMP` |
 | `colorfield` | `Flame` (`new`, `seeded`, `step`, `at`), `Reaction` (`new`, `seeded`, `step`, `at`, `SPOTS`/`MITOSIS`/`MAZE`/`CORAL`), `Wave` (`plasma`, `flag`, `value`), `Palette` (`Fire`/`Ice`/`Rainbow`, `color`) |
-| `video` | `Video` (`new`, `encoding`, `dither`, `sampling`, `filter`, `render_frame`, `render`), `Frame` (`from_rgb`, `from_luma`, `sample`), `Encoding` (`Braille`/`HalfBlock`/`LumaChroma`/`Sextant`), `Dither` (`Bayer`/`FloydSteinberg`), `Sampling` (`Bilinear`/`Nearest`), `Filter` (`Scanlines`/`Vignette`/`Phosphor`/`Gamma`/`Saturation`/`Grayscale`), `Rgb` |
+| `video` | `Video` (`new`, `encoding`, `dither`, `sampling`, `filter`, `render_frame`, `render`), `Frame` (`from_rgb`, `from_luma`, `sample`), `Encoding` (`Braille`/`HalfBlock`/`LumaChroma`/`Sextant`), `Dither` (`Bayer`/`FloydSteinberg`/`TemporalBayer`), `Sampling` (`Bilinear`/`Nearest`), `Filter` (`Scanlines`/`Vignette`/`Phosphor`/`Gamma`/`Saturation`/`Grayscale`), `Rgb` |
 | `theme` | `Theme` (`default`, `light`, `border_style`) |
 | `capabilities` | `Capabilities` (`detect`, `full`, `from_env`) |
 | `charset` | `box_to_ascii` |
@@ -1535,7 +1554,7 @@ with ok/error/dim colours — census's LDIF change preview, AAA config diffs.
 | `sugiyama` | `auto_layout`, `assign_layers`, `order_layers`, `crossings`, `SugiyamaParams`, `LayerDir` |
 | `refine` | `score`, `refine` (greedy), `anneal` (`AnnealParams`), `LayoutScore` (`weighted`), `ScoreWeights`, `Preference`, `learn_weights` |
 | `text` | `wrap`, `wrap_into_slots`, `shape_line`, `render_wrapped`, `render_line`, `WrappedText` (`lines`, `visible`, `page`, `page_count`), `VisualLine`, `VisualCell`, `CursorMap` (`visual_to_logical`, `logical_to_visual`), `BaseDirection` |
-| `record` | `RecordSource` (`key_of`, `fetch_after`, `fetch_before`, `approx_position`, `exact_len`), `Window`, `VecRecordSource` (`new`, `estimated`) |
+| `record` | `RecordSource` (`key_of`, `fetch_after`, `fetch_before`, `approx_position`, `exact_len`), `Window`, `VecRecordSource` (`new`, `estimated`), `RangeSource` (`new`, `len`, `is_empty`) |
 | `vlist` | `VirtualList` (`visible`, `scroll_by`, `set_viewport`, `scroll_metrics`, `at_top`/`at_bottom`, `capacity`), `ScrollMetrics`, `render_scrollbar` (vertical or horizontal by rect shape) |
 | `docview` | `DocView` (`new`, `set_width`, `scroll_by`, `scroll_to_line`, `seek_to_byte`, `line_to_byte`, `byte_to_line`, `total_lines`, `line_count_hint`, `visible_lines`), `render_doc` |
 | `runaround` | `flow`, `slots_in`, `render_flow`, `Slot`, `PlacedLine` |
@@ -1544,6 +1563,9 @@ with ok/error/dim colours — census's LDIF change preview, AAA config diffs.
 | `label` | `draw_label`, `label_period`, `Label`, `Side`, `Align` |
 | `input` | `InputRouter`, `KeyOutcome`, `NavCommand`, `Keymap`, `MouseOutcome` (+ re-exported `KeyEvent`/`KeyCode`/`KeyModifiers`, `MouseEvent`/`MouseEventKind`/`MouseButton`) |
 | `mouse` | `tile_at`, `carousel_at` |
+| `diff` | `diff_lines` (LCS line diff), `render_diff_unified`, `DiffOp` |
+| `form` | `FormLayout` (`rows`), `FormRow`, `Validity`, `focus_step`, `render_validity` |
+| `outline` | `render_tree_row`, `tree_prefix` |
 
 `Tree` methods worth knowing: `focus_set`/`focus_next`/`focus_prev`/`focus_first`/
 `focus_last`/`ensure_focus_valid`, `focus_dir`/`focus_dir_cross`,
@@ -1558,8 +1580,8 @@ Common re-exports at the crate root: `Buffer`, `Cell`, `Node`, `Constraint`,
 `reconcile_split`, `region_of`, `carousel_visible_range`, `BorderGap`,
 `ColumnDef`, `ColumnGrid`, `ColumnKind`, `Table`, `FloatLayer`, `FloatChild`,
 `FloatRect`, `FreeInterval`, `wrap`, `shape_line`, `WrappedText`, `VisualLine`,
-`CursorMap`, `BaseDirection`, `RecordSource`, `VecRecordSource`, `Window`,
-`VirtualList`, `ScrollMetrics`, `render_scrollbar`, `DocView`, `render_doc`,
+`CursorMap`, `BaseDirection`, `RecordSource`, `VecRecordSource`, `RangeSource`,
+`Window`, `VirtualList`, `ScrollMetrics`, `render_scrollbar`, `DocView`, `render_doc`,
 `wrap_into_slots`, `flow`, `slots_in`, `render_flow`, `Slot`, `PlacedLine`,
 `Socket`, `Flow`, `FlowStyle`, `draw_socket`, `bookends`, `GraphCanvas`, `route`,
 `route_all`, `Connector`, `RouteRequest`, `render_connectors`, `Viewport`, `Lod`,
@@ -1842,6 +1864,15 @@ snippet.  Uses `Buffer::empty` and an in-memory render (no real terminal needed)
 cargo run --example quickstart
 ```
 
+**`examples/smoke.rs`** (the Phase 0 smoke test — a minimal buffer render) and
+**`examples/demo.rs`** (an interactive walkthrough of Phases 1–5) are the basic
+sanity check and guided tour:
+
+```text
+cargo run --example smoke
+cargo run --example demo
+```
+
 **`examples/showcase.rs`** — a full runnable monitor: `render_shared` header strip,
 vertical smooth-scrolling `Carousel` with `render_carousel`, marquee top-border
 labels, upright units labels, arrow-key focus, Heavy-border focus highlight,
@@ -2062,7 +2093,7 @@ text engine, and node graphs on top of the tiling core):
 |-------|-------------|
 | 1     | `mullion::float` — floating tiles + free-space slots/cells; `mullion::record` `RecordSource` trait + `Window`; §3.15 manual |
 | 2     | `mullion::text` — bidi-aware wrapping, logical↔visual `CursorMap`, pagination/scrolling, `shape_line`; §3.16 manual |
-| 3     | `mullion::vlist` — row virtualization over `RecordSource`, exact/estimate scrollbar; `VecRecordSource`; §3.17 manual |
+| 3     | `mullion::vlist` — row virtualization over `RecordSource`, exact/estimate scrollbar; `VecRecordSource`, `RangeSource` (computed `0..len` range, lazy per-index build — browse a `/8` for the cost of a `/24`); §3.17 manual |
 | 4     | `mullion::docview` — wrapped-line virtualization, lazy byte→line index, width-change invalidation; §3.18 manual |
 | 5     | `mullion::runaround` — slot-stream flow around floating tiles (`wrap_into_slots`, `flow`); LTR then BiDi × runaround; §3.19 manual |
 | 6     | `mullion::socket` — `Socket` (`BorderGap` with semantics), gap geometry + `pack`, `FlowStyle` connector-flow gradient; §3.20 manual |

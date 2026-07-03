@@ -80,15 +80,17 @@ impl Capabilities {
 /// Pure function — no environment I/O — so it can be exercised in tests
 /// without touching the process environment.  Pass `None` for absent variables.
 ///
-/// `ctype` should be the first of `LC_ALL`, `LC_CTYPE`, or `LANG` that is set.
+/// `ctype` should be the first of `LC_ALL`, `LC_CTYPE`, or `LANG` that is set. It is
+/// currently reserved and unused — the unicode heuristic below no longer inspects the
+/// locale (see the inline note at the `let _ = ctype;` binding).
 ///
 /// ## Heuristics (conservative — when unsure, degrade)
 ///
 /// * **color:** `COLORTERM = truecolor | 24bit` → `TrueColor`; `TERM` contains
 ///   `256color` → `Palette256`; otherwise → `Palette16`.
-/// * **unicode:** locale contains `UTF-8` or `utf8` → `true`; `TERM = linux`
-///   (Linux text console, unreliable Unicode even with a UTF-8 locale) →
-///   `false`; absent/unrecognised → `true` (most modern emulators work fine).
+/// * **unicode:** `TERM = linux` (Linux text console, unreliable Unicode even with a
+///   UTF-8 locale) → `false`; every other `TERM` → `true`, regardless of locale (the
+///   `ctype` locale is not inspected — most modern emulators work fine).
 /// * **synchronized_output:** always `true` (the sequence is safe to emit on
 ///   non-supporting terminals).
 pub fn from_env(
