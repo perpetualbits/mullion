@@ -6,7 +6,9 @@ use unicode_width::UnicodeWidthStr;
 
 use crossterm::{
     cursor::{Hide, MoveTo, Show},
-    event::{DisableMouseCapture, EnableMouseCapture},
+    event::{
+        DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+    },
     execute, queue,
     style::{
         Attribute, Color as CtColor, Colors, Print, SetAttribute, SetBackgroundColor,
@@ -195,6 +197,7 @@ impl<W: Write> CrosstermBackend<W> {
         // on the primary screen too — both were set explicit in `enter`, so the
         // user's shell is not left with reordering disabled.
         self.writer.write_all(BDSM_IMPLICIT)?;
+        execute!(self.writer, DisableBracketedPaste)?;
         if self.mouse_enabled {
             execute!(self.writer, DisableMouseCapture, LeaveAlternateScreen, Show)?;
         } else {
@@ -460,6 +463,11 @@ impl<W: Write> Backend for CrosstermBackend<W> {
             // (extended coords for wide terminals).
             execute!(self.writer, EnableMouseCapture)?;
         }
+        // Bracketed paste: the terminal wraps a paste in ESC[200~ … ESC[201~ so the
+        // app receives one atomic `Event::Paste` instead of the pasted text arriving
+        // as a stream of key events (which would run embedded newlines/letters as
+        // commands). Always on — terminals that don't support it ignore the escape.
+        execute!(self.writer, EnableBracketedPaste)?;
         self.entered = true;
 
         // Capture mouse_enabled at hook-install time so the panic closure can
@@ -472,6 +480,7 @@ impl<W: Write> Backend for CrosstermBackend<W> {
             // These are best-effort; the main cleanup path is the Drop impl.
             let _ = disable_raw_mode();
             let _ = std::io::stderr().write_all(BDSM_IMPLICIT);
+            let _ = execute!(std::io::stderr(), DisableBracketedPaste);
             if mouse_enabled_for_hook {
                 let _ = execute!(std::io::stderr(), DisableMouseCapture, LeaveAlternateScreen, Show);
             } else {
@@ -548,6 +557,8 @@ mod tests {
         assert!(out.contains("\x1b[?25h"), "missing show-cursor in: {out:?}");
         // Default mouse_enabled=true → leave must also disable mouse capture.
         assert!(out.contains("\x1b[?1000l"), "missing disable-mouse in: {out:?}");
+        // Bracketed paste (enabled in `enter`) must be turned back off.
+        assert!(out.contains("\x1b[?2004l"), "missing disable-bracketed-paste in: {out:?}");
         // BiDi support mode is restored to the terminal's implicit default.
         assert!(out.contains("\x1b[8h"), "missing BDSM-implicit restore in: {out:?}");
     }
