@@ -1850,6 +1850,15 @@ fn main() -> io::Result<()> {
 # fn sample_groups()  -> Vec<Group> { Vec::new() }
 ```
 
+**Suspending for a subprocess.** `draw` only sends cells that differ from its record of
+the screen (`front`). If you hand the terminal to another program mid-session — leave
+raw/alternate mode to run an interactive prompt (e.g. a GPG passphrase via `pinentry`),
+then re-enter — that record is stale and the next diff will wrongly skip cells it thinks
+are already correct, leaving a half-painted screen. Call `term.clear()` after re-entering
+to clear the screen and blank `front`, so the next `draw` repaints the whole frame. (The
+same all-blank-`front` trick `check_resize` uses after a resize, exposed to trigger on
+purpose. Also the right call after returning from SIGTSTP.)
+
 That is the whole architecture: central state joined to the tree by `TileId`,
 `reconcile_carousel` on the data clock, a render that dispatches between carousel and
 drilled-in tile, and app-owned input — every other feature (labels, theming, mouse,

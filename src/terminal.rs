@@ -81,6 +81,28 @@ impl<B: Backend> Terminal<B> {
         self.backend.leave()
     }
 
+    /// Clear the physical screen and discard the cached model of it, so the next
+    /// [`draw`](Terminal::draw) repaints every cell from scratch.
+    ///
+    /// Why it exists: `draw` only sends cells that differ from `front`, its record of
+    /// what the screen currently shows. If something *outside* mullion writes to the
+    /// terminal — suspending to run an interactive subprocess (a passphrase prompt),
+    /// resuming after `enter`/`leave`, or returning from SIGTSTP — that record is stale
+    /// and the diff would wrongly skip cells it thinks are already correct. Clearing the
+    /// screen and blanking `front` makes the next diff emit the whole frame. (This is
+    /// the same all-blank-front trick [`check_resize`](Terminal::check_resize) relies on
+    /// after a resize, exposed for callers to trigger deliberately.)
+    ///
+    /// # Errors
+    /// Propagates errors from the backend's frame/clear calls.
+    pub fn clear(&mut self) -> io::Result<()> {
+        self.backend.begin_frame()?;
+        self.backend.clear()?;
+        self.backend.end_frame()?;
+        self.front.reset(); // blank model → next diff re-emits every non-blank cell
+        Ok(())
+    }
+
     /// Check whether the terminal dimensions changed and reallocate buffers if so.
     ///
     /// Queries [`Backend::size`] and compares it to the current front-buffer area.
@@ -284,5 +306,33 @@ mod tests {
         let reader = EventReader::new();
         assert!(reader.try_recv().is_none());
         assert_eq!(reader.drain().count(), 0);
+    }
+
+    #[test]
+    fn clear_forces_a_full_repaint_after_external_corruption() {
+        use crate::backend::TestBackend;
+        use crate::style::Style;
+
+        let mut term = Terminal::new(TestBackend::new(4, 1)).unwrap();
+        let paint = |b: &mut Buffer| {
+            b.set_string(0, 0, "HI", Style::default());
+        };
+
+        term.draw(paint).unwrap();
+        assert_eq!(term.backend().render(), "HI  ");
+
+        // Simulate a subprocess wiping the screen behind mullion's back: the physical
+        // surface is now blank, but `front` still models "HI".
+        term.backend_mut().clear().unwrap();
+        assert_eq!(term.backend().render(), "    ");
+
+        // A plain redraw of identical content cannot restore it — the diff sees no change.
+        term.draw(paint).unwrap();
+        assert_eq!(term.backend().render(), "    ", "diff wrongly skips unchanged-but-lost cells");
+
+        // clear() discards the stale model, so the next draw repaints every cell.
+        term.clear().unwrap();
+        term.draw(paint).unwrap();
+        assert_eq!(term.backend().render(), "HI  ");
     }
 }
