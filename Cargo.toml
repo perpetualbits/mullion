@@ -11,6 +11,10 @@ name = "mullion"
 path = "src/lib.rs"
 
 [[example]]
+name = "spacefill"
+path = "examples/spacefill.rs"
+
+[[example]]
 name = "smoke"
 path = "examples/smoke.rs"
 
