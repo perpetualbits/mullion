@@ -24,7 +24,7 @@ use mullion::{
     border::{BorderStyle, CornerStyle, LineWeight},
     panel::{draw_panel, Panel},
     poll_event,
-    spacefill::{strictly_continuous, Gilbert},
+    spacefill::{spanning_curve, strictly_continuous, Gilbert},
     style::{Color, Style},
     Buffer, Field, Rect, Terminal,
 };
@@ -44,9 +44,6 @@ struct Block {
 }
 
 impl Block {
-    fn covers(&self, x: i32, y: i32) -> bool {
-        x >= self.x && x < self.x + self.w && y >= self.y && y < self.y + self.h
-    }
     /// Integer AABB overlap (touching edges is allowed; shared cells are not).
     fn overlaps(&self, o: &Block) -> bool {
         self.x < o.x + o.w && o.x < self.x + self.w && self.y < o.y + o.h && o.y < self.y + self.h
@@ -56,8 +53,13 @@ impl Block {
 struct App {
     g: Gilbert,
     blocks: Vec<Block>,
-    /// The current allowed-cell line (Gilbert order, forbidden filtered out).
+    /// The current allowed-cell line: filtered Gilbert order (landscape) or the
+    /// continuous spanning-tree cycle (strand).
     order: Vec<(u32, u32)>,
+    /// `false` = filled landscape (locality only); `true` = continuous 4-connected strand.
+    strand: bool,
+    /// In strand mode, whether the current mask admits a continuous curve.
+    feasible: bool,
     invert: bool,
     head: usize,
     span: usize,
@@ -76,25 +78,23 @@ fn panel_interior(area: Rect) -> Rect {
     )
 }
 
-/// Same-parity grid dims for the field (shrink a row if needed) — keeps the underlying
-/// line strictly continuous where the mask allows it.
+/// Even grid dims for the field. Both even ⇒ same parity (strictly continuous line) and
+/// an exact 2×2-block grid, so the continuous-strand mode always applies.
 fn grid_dims(fa: Rect) -> (u32, u32) {
-    let w = (fa.width as u32).max(2);
-    let mut h = (fa.height as u32).max(2);
-    if w % 2 != h % 2 {
-        h -= 1;
-    }
+    let w = ((fa.width as u32) & !1).max(4);
+    let h = ((fa.height as u32) & !1).max(4);
     (w, h)
 }
 
 /// Seed a spread of different-sized forbidden blocks with distinct orbits.
 fn seed_blocks(w: u32, h: u32) -> Vec<Block> {
     let (fw, fh) = (w as f32, h as f32);
+    // Even sizes so a block-aligned (2×2) footprint is exact in strand mode.
     let specs = [
         (0.28, 0.30, 6, 4, 0.0),
         (0.70, 0.28, 4, 4, 1.7),
-        (0.30, 0.70, 3, 6, 3.1),
-        (0.72, 0.70, 5, 3, 4.6),
+        (0.30, 0.70, 2, 6, 3.1),
+        (0.72, 0.70, 6, 2, 4.6),
         (0.50, 0.50, 4, 2, 5.9),
     ];
     specs
@@ -144,15 +144,32 @@ fn step_blocks(blocks: &mut [Block], w: u32, h: u32, t: f32) {
 }
 
 impl App {
-    /// Recompute the allowed-cell line for the current mask.
+    /// Recompute the address line for the current mask. Landscape mode filters the
+    /// Gilbert order (locality only); strand mode builds a continuous spanning-tree cycle
+    /// over 2×2-block-snapped holes, and on an infeasible mask keeps the previous curve
+    /// and flags `feasible = false` — the exclusion-zone repulsion made visible.
     fn remask(&mut self) {
-        // Borrow split: collect the mask closure inputs without borrowing `self` twice.
         let blocks = &self.blocks;
         let invert = self.invert;
-        self.order = self.g.masked_order(|x, y| {
-            let forbidden = blocks.iter().any(|b| b.covers(x as i32, y as i32));
-            forbidden == invert
-        });
+        // `snap` rounds a block to the even 2×2 lattice so strand masks are block-aligned.
+        let forbidden = move |x: u32, y: u32, snap: bool| {
+            blocks.iter().any(|b| {
+                let (bx, by) = if snap { (b.x & !1, b.y & !1) } else { (b.x, b.y) };
+                (x as i32) >= bx && (x as i32) < bx + b.w && (y as i32) >= by && (y as i32) < by + b.h
+            })
+        };
+        if self.strand {
+            match spanning_curve(self.g.width(), self.g.height(), |x, y| forbidden(x, y, true) == invert) {
+                Some(o) => {
+                    self.order = o;
+                    self.feasible = true;
+                }
+                None => self.feasible = false, // repel: hold the last good strand
+            }
+        } else {
+            self.order = self.g.masked_order(|x, y| forbidden(x, y, false) == invert);
+            self.feasible = true;
+        }
     }
 }
 
@@ -163,8 +180,13 @@ fn render(buf: &mut Buffer, app: &App) {
     }
     // Frame the landscape in a real mullion Panel: title on top, live status footer.
     let forbidden_cells = (app.g.width() * app.g.height()) as usize - app.order.len();
+    let mode = if app.strand {
+        if app.feasible { "STRAND (continuous)" } else { "STRAND (repelling — no path)" }
+    } else {
+        "LANDSCAPE (locality)"
+    };
     let status = format!(
-        " {}×{}  ·  allowed {} (constant)  ·  forbidden {forbidden_cells}  ·  {}  ·  {} ",
+        " {}×{}  ·  {mode}  ·  line {}  ·  forbidden {forbidden_cells}  ·  {}  ·  {} ",
         app.g.width(),
         app.g.height(),
         app.order.len(),
@@ -177,7 +199,7 @@ fn render(buf: &mut Buffer, app: &App) {
         style: Style::default().fg(Color::Rgb(120, 130, 160)),
     };
     let panel = Panel::new(bstyle)
-        .title("address landscape over holes — ←/→ window · i invert · space · q")
+        .title("space-filling over holes — c landscape/strand · i invert · ←/→ window · space · q")
         .footer(&status);
     let interior = draw_panel(buf, area, &panel);
     if interior.width == 0 || interior.height == 0 {
@@ -224,6 +246,8 @@ fn build_app(fa: Rect) -> App {
         g,
         blocks,
         order: Vec::new(),
+        strand: false,
+        feasible: true,
         invert: false,
         head: 0,
         span: 1,
@@ -264,10 +288,35 @@ fn selfcheck() {
     let bbox = ((maxx - minx + 1) * (maxy - miny + 1)) as usize;
     assert!(bbox <= 12 * span, "masked window blob bbox {bbox} for span {span}");
     eprintln!(
-        "selfcheck: {}×{} grid, allowed area constant at {baseline} across 400 frames; window span {span} → bbox {bbox}",
+        "selfcheck landscape: {}×{} grid, allowed area constant at {baseline} across 400 frames; window span {span} → bbox {bbox}",
         app.g.width(),
         app.g.height()
     );
+
+    // Strand mode: the order must be a genuine continuous cycle (unit steps + closure),
+    // and it stays continuous as the holes bob (repel keeps it valid).
+    app.strand = true;
+    app.remask();
+    let mut continuous_frames = 0;
+    for _ in 0..300 {
+        app.t += 0.05;
+        let saved = app.blocks.clone();
+        step_blocks(&mut app.blocks, app.g.width(), app.g.height(), app.t);
+        app.remask();
+        if !app.feasible {
+            app.blocks = saved;
+            app.remask();
+        }
+        // Verify continuity of the current strand.
+        let o = &app.order;
+        for i in 0..o.len() {
+            let a = o[i];
+            let b = o[(i + 1) % o.len()];
+            assert_eq!(a.0.abs_diff(b.0) + a.1.abs_diff(b.1), 1, "strand unit step {a:?}->{b:?}");
+        }
+        continuous_frames += 1;
+    }
+    eprintln!("selfcheck strand: continuous Hamiltonian cycle held across {continuous_frames} frames (len {})", app.order.len());
     eprintln!("all checks passed");
 }
 
@@ -296,8 +345,14 @@ fn run(term: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<()> {
         }
         if !app.paused {
             app.t += 0.05;
+            let saved = app.blocks.clone();
             step_blocks(&mut app.blocks, app.g.width(), app.g.height(), app.t);
             app.remask();
+            if app.strand && !app.feasible {
+                // The morph broke continuity — repel: undo the move, restore the curve.
+                app.blocks = saved;
+                app.remask();
+            }
             let n = app.order.len().max(1);
             app.head = (app.head + (n / 240).max(1)) % n;
             app.span = app.span.min(n);
@@ -308,6 +363,17 @@ fn run(term: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<()> {
             match code {
                 KeyCode::Char('q') => break,
                 KeyCode::Char(' ') => app.paused = !app.paused,
+                KeyCode::Char('c') => {
+                    app.strand = !app.strand;
+                    app.remask();
+                    app.head = 0;
+                    // A short comet in strand mode reads as a point moving along the line.
+                    app.span = if app.strand {
+                        (app.order.len() / 40).max(2)
+                    } else {
+                        (app.order.len() / 12).max(1)
+                    };
+                }
                 KeyCode::Char('i') => {
                     app.invert = !app.invert;
                     app.remask();

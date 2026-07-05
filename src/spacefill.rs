@@ -318,6 +318,278 @@ impl Gilbert {
     }
 }
 
+/// Whether an allowed region can host a **continuous** (4-connected) space-filling
+/// strand — the necessary gate from the checkerboard-parity theorem. See
+/// [`region_feasibility`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Feasibility {
+    /// The allowed cells form a single 4-connected component.
+    pub connected: bool,
+    /// `#black − #white` over the allowed cells on a checkerboard colouring `(x+y)%2`.
+    pub color_balance: i32,
+    /// A Hamiltonian **path** (open strand) can exist: connected and `|balance| ≤ 1`.
+    pub path_possible: bool,
+    /// A Hamiltonian **cycle** (closed loop) can exist: connected and `balance == 0`.
+    pub cycle_possible: bool,
+}
+
+/// Test whether an allowed/forbidden region *could* carry a continuous unit-step strand
+/// visiting every allowed cell once — the exclusion-zone gate. A morphing mask that would
+/// break [`path_possible`](Feasibility::path_possible) is one the repulsion must reject.
+///
+/// This checks the two **necessary** conditions exactly, in `O(width·height)`:
+/// - **connectivity** — the allowed cells are one 4-connected blob (else no single strand
+///   can reach them all);
+/// - **parity balance** — a 4-connected path alternates black/white, so it needs
+///   `|#black − #white| ≤ 1` (a closed cycle needs `= 0`). A balanced hole (e.g. an even×even
+///   block) leaves the balance untouched wherever it sits — which is why such holes may bob
+///   freely, while an odd-area hole shifts the balance and can forbid a closed tour.
+///
+/// These are necessary, not sufficient (grid-graph Hamiltonicity is NP-hard in general);
+/// a constructive engine narrows the admissible masks further (e.g. to 2×2-block-aligned
+/// regions) so that passing the gate also *guarantees* a curve.
+#[must_use]
+pub fn region_feasibility(
+    width: u32,
+    height: u32,
+    allowed: impl Fn(u32, u32) -> bool,
+) -> Feasibility {
+    let (w, h) = (width as usize, height as usize);
+    let is_allowed: Vec<bool> = (0..w * h).map(|i| allowed((i % w) as u32, (i / w) as u32)).collect();
+
+    // Checkerboard balance over the allowed cells.
+    let mut balance = 0i32;
+    let mut first = None;
+    let mut total = 0usize;
+    for (i, &a) in is_allowed.iter().enumerate() {
+        if a {
+            total += 1;
+            first.get_or_insert(i);
+            if (i % w + i / w) % 2 == 0 {
+                balance += 1;
+            } else {
+                balance -= 1;
+            }
+        }
+    }
+
+    // Connectivity: flood-fill from the first allowed cell.
+    let connected = match first {
+        None => false, // an empty region hosts no strand
+        Some(start) => {
+            let mut seen = vec![false; w * h];
+            let mut stack = vec![start];
+            seen[start] = true;
+            let mut reached = 0usize;
+            while let Some(id) = stack.pop() {
+                reached += 1;
+                let (x, y) = (id % w, id / w);
+                let mut push = |nx: usize, ny: usize| {
+                    let nid = ny * w + nx;
+                    if is_allowed[nid] && !seen[nid] {
+                        seen[nid] = true;
+                        stack.push(nid);
+                    }
+                };
+                if x > 0 { push(x - 1, y); }
+                if x + 1 < w { push(x + 1, y); }
+                if y > 0 { push(x, y - 1); }
+                if y + 1 < h { push(x, y + 1); }
+            }
+            reached == total
+        }
+    };
+
+    Feasibility {
+        connected,
+        color_balance: balance,
+        path_possible: connected && balance.abs() <= 1,
+        cycle_possible: connected && balance == 0,
+    }
+}
+
+/// Build a **continuous** (4-connected) Hamiltonian cycle visiting every allowed cell of
+/// a **2×2-block-aligned** mask — a genuine unbroken space-filling strand through the
+/// holes, not just a filtered order.
+///
+/// The construction is the spanning-tree space-filling curve, which needs no search and
+/// is always continuous when it applies: seed each allowed 2×2 block as a 4-cell loop,
+/// then for every edge of a spanning tree of the block-adjacency graph, splice the two
+/// blocks' loops into one (remove the shared-side edge from each loop, add the two
+/// cross-boundary edges). A spanning tree has exactly `blocks − 1` edges and no cycles,
+/// so each splice joins two *distinct* loops — all block-loops merge into a single cycle
+/// over every allowed cell. Locality follows the tree, grown in Gilbert order so a
+/// contiguous run of the resulting line stays a compact blob.
+///
+/// Returns `None` — the configurations the exclusion zone must repel — when `width` or
+/// `height` is odd, when the mask is not block-aligned (some 2×2 block is only partly
+/// allowed), or when the allowed blocks are not a single connected region. `O(w·h)`.
+#[must_use]
+pub fn spanning_curve(
+    width: u32,
+    height: u32,
+    allowed: impl Fn(u32, u32) -> bool,
+) -> Option<Vec<(u32, u32)>> {
+    if width % 2 != 0 || height % 2 != 0 {
+        return None;
+    }
+    let (w, h) = (width as usize, height as usize);
+    let (bw, bh) = (w / 2, h / 2); // block grid
+
+    // Block-allowed + alignment: every 2×2 block must be fully allowed or fully forbidden.
+    let mut ballowed = vec![false; bw * bh];
+    for by in 0..bh {
+        for bx in 0..bw {
+            let cells = [(2 * bx, 2 * by), (2 * bx + 1, 2 * by), (2 * bx, 2 * by + 1), (2 * bx + 1, 2 * by + 1)];
+            let cnt = cells.iter().filter(|&&(x, y)| allowed(x as u32, y as u32)).count();
+            match cnt {
+                4 => ballowed[by * bw + bx] = true,
+                0 => {}
+                _ => return None, // a split block — mask is not 2×2-aligned
+            }
+        }
+    }
+
+    // Blocks in Gilbert order (for a locality-friendly spanning tree), filtered to allowed.
+    let gb = Gilbert::new(bw as u32, bh as u32);
+    let order_blocks: Vec<usize> =
+        gb.cells().iter().map(|&(x, y)| y as usize * bw + x as usize).filter(|&b| ballowed[b]).collect();
+    let start = *order_blocks.first()?;
+    let mut grank = vec![usize::MAX; bw * bh];
+    for (i, &b) in order_blocks.iter().enumerate() {
+        grank[b] = i;
+    }
+
+    // DFS spanning tree over allowed blocks, exploring neighbours in Gilbert-rank order so
+    // the tree hugs the Hilbert path.
+    let mut visited = vec![false; bw * bh];
+    let mut tree: Vec<(usize, usize)> = Vec::new();
+    let mut stack = vec![start];
+    visited[start] = true;
+    while let Some(cur) = stack.pop() {
+        let (cbx, cby) = ((cur % bw) as isize, (cur / bw) as isize);
+        let mut nbrs = Vec::new();
+        for (nx, ny) in [(cbx - 1, cby), (cbx + 1, cby), (cbx, cby - 1), (cbx, cby + 1)] {
+            if nx >= 0 && ny >= 0 && (nx as usize) < bw && (ny as usize) < bh {
+                let nb = ny as usize * bw + nx as usize;
+                if ballowed[nb] && !visited[nb] {
+                    nbrs.push(nb);
+                }
+            }
+        }
+        nbrs.sort_by_key(|&b| grank[b]);
+        for &nb in nbrs.iter().rev() {
+            if !visited[nb] {
+                visited[nb] = true;
+                tree.push((cur, nb));
+                stack.push(nb);
+            }
+        }
+    }
+    if order_blocks.iter().any(|&b| !visited[b]) {
+        return None; // allowed blocks are disconnected
+    }
+
+    // Fine-cell 2-regular graph: `nbr[cell]` holds the (≤2) cycle neighbours.
+    let mut nbr = vec![[-1i64, -1i64]; w * h];
+    let cell = |x: usize, y: usize| y * w + x;
+    fn link(nbr: &mut [[i64; 2]], a: usize, b: usize) {
+        for s in &mut nbr[a] {
+            if *s < 0 {
+                *s = b as i64;
+                break;
+            }
+        }
+        for s in &mut nbr[b] {
+            if *s < 0 {
+                *s = a as i64;
+                break;
+            }
+        }
+    }
+    fn unlink(nbr: &mut [[i64; 2]], a: usize, b: usize) {
+        for s in &mut nbr[a] {
+            if *s == b as i64 {
+                *s = -1;
+                break;
+            }
+        }
+        for s in &mut nbr[b] {
+            if *s == a as i64 {
+                *s = -1;
+                break;
+            }
+        }
+    }
+
+    // Seed each allowed block as a 4-cell loop TL-TR-BR-BL-TL.
+    for by in 0..bh {
+        for bx in 0..bw {
+            if !ballowed[by * bw + bx] {
+                continue;
+            }
+            let (tl, tr) = (cell(2 * bx, 2 * by), cell(2 * bx + 1, 2 * by));
+            let (br, bl) = (cell(2 * bx + 1, 2 * by + 1), cell(2 * bx, 2 * by + 1));
+            link(&mut nbr, tl, tr);
+            link(&mut nbr, tr, br);
+            link(&mut nbr, br, bl);
+            link(&mut nbr, bl, tl);
+        }
+    }
+
+    // Splice loops along each tree edge. Orient so `B` is immediately east or south of `A`.
+    for &(p, q) in &tree {
+        let (pbx, pby) = (p % bw, p / bw);
+        let (qbx, qby) = (q % bw, q / bw);
+        let (abx, aby, bbx, bby, east) = if qby == pby && qbx == pbx + 1 {
+            (pbx, pby, qbx, qby, true)
+        } else if pby == qby && pbx == qbx + 1 {
+            (qbx, qby, pbx, pby, true)
+        } else if qbx == pbx && qby == pby + 1 {
+            (pbx, pby, qbx, qby, false)
+        } else {
+            (qbx, qby, pbx, pby, false)
+        };
+        if east {
+            // A's right edge (TR-BR) and B's left edge (TL-BL) → two horizontal crosses.
+            let (a_tr, a_br) = (cell(2 * abx + 1, 2 * aby), cell(2 * abx + 1, 2 * aby + 1));
+            let (b_tl, b_bl) = (cell(2 * bbx, 2 * bby), cell(2 * bbx, 2 * bby + 1));
+            unlink(&mut nbr, a_tr, a_br);
+            unlink(&mut nbr, b_tl, b_bl);
+            link(&mut nbr, a_tr, b_tl);
+            link(&mut nbr, a_br, b_bl);
+        } else {
+            // A's bottom edge (BL-BR) and B's top edge (TL-TR) → two vertical crosses.
+            let (a_bl, a_br) = (cell(2 * abx, 2 * aby + 1), cell(2 * abx + 1, 2 * aby + 1));
+            let (b_tl, b_tr) = (cell(2 * bbx, 2 * bby), cell(2 * bbx + 1, 2 * bby));
+            unlink(&mut nbr, a_bl, a_br);
+            unlink(&mut nbr, b_tl, b_tr);
+            link(&mut nbr, a_bl, b_tl);
+            link(&mut nbr, a_br, b_tr);
+        }
+    }
+
+    // Walk the single cycle from a start cell.
+    let total = order_blocks.len() * 4;
+    let start_cell = cell(2 * (start % bw), 2 * (start / bw)) as i64;
+    let mut order = Vec::with_capacity(total);
+    let (mut prev, mut cur) = (-1i64, start_cell);
+    loop {
+        order.push(((cur as usize % w) as u32, (cur as usize / w) as u32));
+        let [n0, n1] = nbr[cur as usize];
+        let next = if n0 != prev && n0 >= 0 { n0 } else { n1 };
+        if next < 0 {
+            return None; // malformed (should not happen for a valid spanning tree)
+        }
+        prev = cur;
+        cur = next;
+        if cur == start_cell {
+            break;
+        }
+    }
+    (order.len() == total).then_some(order)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -486,5 +758,89 @@ mod tests {
             let bbox = ((maxx - minx + 1) * (maxy - miny + 1)) as usize;
             assert!(bbox <= 10 * len, "masked run start={start} len={len} bbox={bbox}");
         }
+    }
+
+    #[test]
+    fn feasibility_gate_reads_connectivity_and_parity() {
+        // Full even×even grid: balanced and connected → a closed tour is possible.
+        let f = region_feasibility(8, 8, |_, _| true);
+        assert!(f.connected && f.color_balance == 0 && f.cycle_possible);
+
+        // Full odd-area grid (7×7 = 49): imbalance 1 → path yes, cycle no.
+        let f = region_feasibility(7, 7, |_, _| true);
+        assert_eq!(f.color_balance.abs(), 1);
+        assert!(f.path_possible && !f.cycle_possible);
+
+        // A balanced 2×2 hole anywhere leaves the balance at 0 (holes may bob freely).
+        for (hx, hy) in [(0u32, 0u32), (2, 4), (6, 6)] {
+            let f = region_feasibility(8, 8, |x, y| {
+                !((hx..hx + 2).contains(&x) && (hy..hy + 2).contains(&y))
+            });
+            assert_eq!(f.color_balance, 0, "2×2 hole at ({hx},{hy}) stays balanced");
+            assert!(f.cycle_possible);
+        }
+
+        // A single-cell hole unbalances by 1 → no closed tour, but a path still can.
+        let f = region_feasibility(8, 8, |x, y| !(x == 3 && y == 3));
+        assert_eq!(f.color_balance.abs(), 1);
+        assert!(f.path_possible && !f.cycle_possible);
+
+        // Two separated allowed patches → disconnected → no single strand at all.
+        let f = region_feasibility(8, 8, |x, _y| x < 3 || x > 4);
+        // (a full-height gap at columns 3..=4 splits the region in two)
+        assert!(!f.connected && !f.path_possible);
+    }
+
+    /// A `spanning_curve` result must visit every allowed cell once, in unit steps, and
+    /// close back on itself (a genuine continuous Hamiltonian cycle).
+    fn assert_continuous_cycle(w: u32, h: u32, order: &[(u32, u32)], allowed: impl Fn(u32, u32) -> bool) {
+        let expect = (0..w * h).filter(|&i| allowed(i % w, i / w)).count();
+        assert_eq!(order.len(), expect, "covers every allowed cell once");
+        let set: HashSet<_> = order.iter().copied().collect();
+        assert_eq!(set.len(), order.len(), "no repeats");
+        assert!(order.iter().all(|&(x, y)| allowed(x, y)), "never enters a hole");
+        for i in 0..order.len() {
+            let a = order[i];
+            let b = order[(i + 1) % order.len()]; // wrap → checks closure too
+            assert_eq!(a.0.abs_diff(b.0) + a.1.abs_diff(b.1), 1, "unit step {a:?}->{b:?}");
+        }
+    }
+
+    #[test]
+    fn spanning_curve_is_a_continuous_cycle_over_holes() {
+        // Solid even grid.
+        let all = |_: u32, _: u32| true;
+        let c = spanning_curve(16, 16, all).expect("solid grid");
+        assert_continuous_cycle(16, 16, &c, all);
+
+        // A single 2×2-aligned hole.
+        let hole1 = |x: u32, y: u32| !((6..8).contains(&x) && (6..8).contains(&y));
+        let c = spanning_curve(16, 16, hole1).expect("one hole");
+        assert_continuous_cycle(16, 16, &c, hole1);
+
+        // Several holes of different even sizes and positions (all block-aligned).
+        let holes = |x: u32, y: u32| {
+            let a = (2..6).contains(&x) && (2..4).contains(&y); // 4×2
+            let b = (10..14).contains(&x) && (10..16).contains(&y); // 4×6
+            let d = (14..16).contains(&x) && (2..4).contains(&y); // 2×2
+            !(a || b || d)
+        };
+        let c = spanning_curve(20, 20, holes).expect("multi holes");
+        assert_continuous_cycle(20, 20, &c, holes);
+
+        // Inverse mask (mostly forbidden, a connected allowed patch).
+        let patch = |x: u32, y: u32| (4..12).contains(&x) && (4..12).contains(&y);
+        let c = spanning_curve(20, 20, patch).expect("patch");
+        assert_continuous_cycle(20, 20, &c, patch);
+    }
+
+    #[test]
+    fn spanning_curve_rejects_infeasible_masks() {
+        // Odd dimension.
+        assert!(spanning_curve(15, 16, |_, _| true).is_none());
+        // Not 2×2-aligned: a single-cell hole splits a block.
+        assert!(spanning_curve(16, 16, |x, y| !(x == 5 && y == 5)).is_none());
+        // Disconnected allowed blocks (a full-height forbidden channel, block-aligned).
+        assert!(spanning_curve(16, 16, |x, _y| !(8..10).contains(&x)).is_none());
     }
 }
