@@ -21,9 +21,11 @@ use crossterm::event::{Event, KeyCode, KeyEvent};
 
 use mullion::{
     backend::CrosstermBackend,
+    border::{BorderStyle, CornerStyle, LineWeight},
+    panel::{draw_panel, Panel},
     poll_event,
     spacefill::{strictly_continuous, Gilbert},
-    style::{Color, Modifier, Style},
+    style::{Color, Style},
     Buffer, Field, Rect, Terminal,
 };
 
@@ -63,9 +65,15 @@ struct App {
     t: f32,
 }
 
-/// The landscape area (below the help row, above the status row).
-fn field_area(area: Rect) -> Rect {
-    Rect::new(0, 1, area.width, area.height.saturating_sub(2))
+/// The panel interior: the whole area minus the one-cell border the `Panel` draws.
+/// The landscape (a `Field`) fills this, so the demo reads as a real mullion tile.
+fn panel_interior(area: Rect) -> Rect {
+    Rect::new(
+        area.x.saturating_add(1),
+        area.y.saturating_add(1),
+        area.width.saturating_sub(2),
+        area.height.saturating_sub(2),
+    )
 }
 
 /// Same-parity grid dims for the field (shrink a row if needed) — keeps the underlying
@@ -150,11 +158,32 @@ impl App {
 
 fn render(buf: &mut Buffer, app: &App) {
     let area = buf.area;
-    if area.height < 4 {
+    if area.height < 4 || area.width < 4 {
         return;
     }
-    let fa = field_area(area);
-    let field = Field::rect(fa);
+    // Frame the landscape in a real mullion Panel: title on top, live status footer.
+    let forbidden_cells = (app.g.width() * app.g.height()) as usize - app.order.len();
+    let status = format!(
+        " {}×{}  ·  allowed {} (constant)  ·  forbidden {forbidden_cells}  ·  {}  ·  {} ",
+        app.g.width(),
+        app.g.height(),
+        app.order.len(),
+        if app.invert { "blocks=allowed" } else { "blocks=forbidden" },
+        if strictly_continuous(app.g.width(), app.g.height()) { "same-parity" } else { "mixed-parity" },
+    );
+    let bstyle = BorderStyle {
+        weight: LineWeight::Heavy,
+        corners: CornerStyle::Rounded,
+        style: Style::default().fg(Color::Rgb(120, 130, 160)),
+    };
+    let panel = Panel::new(bstyle)
+        .title("address landscape over holes — ←/→ window · i invert · space · q")
+        .footer(&status);
+    let interior = draw_panel(buf, area, &panel);
+    if interior.width == 0 || interior.height == 0 {
+        return;
+    }
+    let field = Field::rect(interior);
     let g = &app.g;
     let n = app.order.len().max(1);
     let (lo, hi) = (app.head, (app.head + app.span).min(app.order.len()));
@@ -185,29 +214,6 @@ fn render(buf: &mut Buffer, app: &App) {
         };
         Some(("█".to_string(), style))
     });
-
-    buf.set_string(
-        0,
-        0,
-        "address landscape over holes — ←/→ window · i invert · space pause · q quit",
-        Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
-    );
-    let forbidden_cells = gw * gh - app.order.len();
-    // A strand through the allowed set can only be strictly continuous when the allowed
-    // count is even (a closed tour) — a nod to the parity rule; here it is informational.
-    let feasible = strictly_continuous(g.width(), g.height());
-    let status = format!(
-        " {gw}×{gh}   allowed {} (line len, constant)   forbidden {forbidden_cells}   {}   grid {}   {}",
-        app.order.len(),
-        if app.invert { "inverted (blocks = allowed)" } else { "blocks = forbidden" },
-        if feasible { "same-parity" } else { "mixed-parity" },
-        if app.paused { "paused" } else { "running" },
-    );
-    let sstyle = Style::default().fg(Color::Black).bg(Color::Gray);
-    for x in 0..area.width {
-        buf.set_string(x, area.height - 1, " ", sstyle);
-    }
-    buf.set_string(0, area.height - 1, &status, sstyle);
 }
 
 fn build_app(fa: Rect) -> App {
@@ -232,7 +238,7 @@ fn build_app(fa: Rect) -> App {
 /// Headless check: the allowed area stays exactly constant as the blocks move, and a
 /// masked contiguous window is a compact blob. `-- --check`.
 fn selfcheck() {
-    let fa = field_area(Rect::new(0, 0, 90, 34));
+    let fa = panel_interior(Rect::new(0, 0, 90, 34));
     let mut app = build_app(fa);
     let baseline = app.order.len();
     let (mut minlen, mut maxlen) = (baseline, baseline);
@@ -280,11 +286,11 @@ fn main() -> io::Result<()> {
 
 fn run(term: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<()> {
     let size = mullion::backend::Backend::size(term.backend())?;
-    let mut app = build_app(field_area(size));
+    let mut app = build_app(panel_interior(size));
 
     loop {
         let size = mullion::backend::Backend::size(term.backend())?;
-        let fa = field_area(size);
+        let fa = panel_interior(size);
         if grid_dims(fa) != (app.g.width(), app.g.height()) {
             app = build_app(fa);
         }
