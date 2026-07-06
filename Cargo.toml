@@ -15,6 +15,10 @@ name = "spacefill"
 path = "examples/spacefill.rs"
 
 [[example]]
+name = "gilbert_map"
+path = "examples/gilbert_map.rs"
+
+[[example]]
 name = "smoke"
 path = "examples/smoke.rs"
 
