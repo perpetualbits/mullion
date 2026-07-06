@@ -451,7 +451,8 @@ fn dump() {
     let (w, h) = (120u16, 46u16);
     let mut app = build_app(panel_interior(Rect::new(0, 0, w, h)));
     app.strand = std::env::args().any(|a| a == "--strand");
-    app.t = 5.0; // a moment where the paired holes are visibly different sizes
+    // `--t=<f32>` picks the frame (default 5.0) so an animation can be stitched from a sweep.
+    app.t = std::env::args().find_map(|a| a.strip_prefix("--t=").and_then(|v| v.parse().ok())).unwrap_or(5.0);
     app.remask();
     let mut buf = Buffer::empty(Rect::new(0, 0, w, h));
     render(&mut buf, &app);
