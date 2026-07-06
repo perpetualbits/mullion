@@ -326,7 +326,7 @@ impl ColumnGrid {
     /// The optional `overlay` closure is called for each cell index
     /// `0 .. width`; when it returns `Some((ch, style))` the returned
     /// character and style overwrite that cell.  Use this for histogram dot
-    /// overlays (e.g. `◻` in a [`planck_color`]-based style) without coupling
+    /// overlays (e.g. `◻` in a caller-chosen style) without coupling
     /// the colour logic to this module.
     ///
     /// ```

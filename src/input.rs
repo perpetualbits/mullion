@@ -353,11 +353,14 @@ impl InputRouter {
     /// Drive focus and carousel scroll from one mouse event.
     ///
     /// Hit-tests the **effective** (zoom-aware) subtree of `tree` laid out in
-    /// `area`.  Three event kinds are handled:
+    /// `area`.  The event kinds handled:
     ///
     /// - **Left-button press** — [`solve`]s the effective root, then calls
     ///   [`tile_at`] to find the tile under the cursor.  If found, calls
     ///   [`Tree::focus_set`] and returns `Focused(id)`.
+    /// - **Mouse moved** — only when hover-to-focus is enabled via
+    ///   [`set_hover_focus`](InputRouter::set_hover_focus); hit-tests exactly like
+    ///   a left press, returning `Focused(id)` or `Ignored`.  A no-op otherwise.
     /// - **Scroll up / scroll down** — calls [`carousel_at`] on the effective
     ///   root to find the innermost carousel under the cursor, then calls
     ///   [`Tree::scroll_by`] with `−step` or `+step` respectively (where `step`

@@ -5,13 +5,17 @@
 //!
 //! The widget's one job is *fidelity*: it samples a source frame and reproduces it
 //! using truecolour and sub-cell resolution. Colour comes **from the picture**, never
-//! decoration — a grey clip stays grey, a colour clip keeps its hues. Two cell
+//! decoration — a grey clip stays grey, a colour clip keeps its hues. Four cell
 //! [`Encoding`]s trade detail against colour resolution:
 //!
-//! - [`Encoding::Braille`] — 2×4 luminance sub-pixels (ordered-dithered) tinted by the
+//! - [`Encoding::Braille`] — 2×4 dithered luminance sub-pixels tinted by the
 //!   cell's average colour: the most spatial **detail**, one colour per cell.
 //! - [`Encoding::HalfBlock`] — `▀` with the upper source pixel as foreground and the
 //!   lower as background: full **colour** at 1×2 pixels per cell.
+//! - [`Encoding::LumaChroma`] — Braille dots brightened toward white over a
+//!   chroma-carrying background: a luma/chroma split, so shadows keep their hue.
+//! - [`Encoding::Sextant`] — 2×3 solid sub-blocks split into two colours whose shape
+//!   follows the picture: full **colour** at the detail-vs-colour sweet spot.
 //!
 //! Anything that *alters* the picture for effect — CRT scanlines, a vignette, a
 //! phosphor tint, colour grading — is an opt-in [`Filter`], applied after sampling.

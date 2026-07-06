@@ -1562,6 +1562,74 @@ ok/warn/error marker.
 [`render_diff_unified`](crate::diff::render_diff_unified) paints the `+`/`-`/` ` gutter
 with ok/error/dim colours — census's LDIF change preview, AAA config diffs.
 
+### 3.30 Space-filling curves — `mullion::spacefill` + `mullion::curve_map`
+
+Push a long 1-D sequence onto a 2-D grid while keeping **locality**: a contiguous *run*
+of the sequence lands as a **compact blob**, not scattered confetti. That is what makes a
+Hilbert-style layout the right *map* for a large index space — an IP subnet, a file-offset
+range, a cluster of ids reads as a patch you can point at. Two modules cooperate: the
+content-agnostic **geometry** ([`spacefill`](crate::spacefill)) and the **drawn map view**
+([`curve_map`](crate::curve_map)).
+
+**The curve.** A plain Hilbert curve only fills a `2^k × 2^k` square; the **generalized
+Hilbert ("Gilbert") curve** fills *any* `width × height` rectangle. [`Gilbert::new`](crate::spacefill::Gilbert)
+materialises both directions — `d → (x, y)` via [`d_to_xy`](crate::spacefill::Gilbert::d_to_xy)
+and `(x, y) → d` via [`xy_to_d`](crate::spacefill::Gilbert::xy_to_d) — in O(1); or take the
+whole order as a `Vec` with [`gilbert_cells`](crate::spacefill::gilbert_cells), or resolve a
+lone index with [`gilbert_d2xy`](crate::spacefill::gilbert_d2xy). Every step is a unit move,
+and the curve is **strictly 4-connected iff the two dimensions share parity** (both even or
+both odd) — [`strictly_continuous`](crate::spacefill::strictly_continuous); mixed parity
+forces one diagonal seam (invisible in a filled landscape).
+
+**Holes and strands.** [`Gilbert::masked_order`](crate::spacefill::Gilbert::masked_order)
+drops a *forbidden* set of cells from the order — the line simply **skips** them, of any
+shape, with locality intact. When you need one *continuous* line that routes **around** the
+holes, [`spanning_curve`](crate::spacefill::spanning_curve) builds a guaranteed 4-connected
+Hamiltonian cycle over a 2×2-block-aligned mask, and [`region_feasibility`](crate::spacefill::region_feasibility)
+is the exact gate (connectivity + checkerboard parity, returning a [`Feasibility`](crate::spacefill::Feasibility))
+that decides whether such a strand can exist before you try.
+
+**Quadrants.** [`Gilbert::subblocks`](crate::spacefill::Gilbert::subblocks) exposes the
+curve's *own* top-level recursive partition as contiguous [`SubBlock`](crate::spacefill::SubBlock)s
+— each a `d`-interval plus the sub-rectangle it fills — the natural atoms of a "step through
+/ zoom into a quadrant" chooser; [`subblock_at`](crate::spacefill::Gilbert::subblock_at) maps
+a line index back to its piece.
+
+**Drawing the map.** [`curve_map`](crate::curve_map) turns a cell count and a per-cell colour
+into pixels, knowing nothing about what a cell *means*:
+[`fit_dims`](crate::curve_map::fit_dims) sizes the grid so `w·h` is the largest power of two
+dividing the item count and fitting the area (equal `2^k`-item cells, even `w+h`);
+[`cell_glyph`](crate::curve_map::cell_glyph) is the rounded box-drawing glyph (`─│╭╮╰╯`)
+for a cell's segment of the curve; [`render`](crate::curve_map::render) paints the whole grid
+— the threaded curve over each cell's `(fg, bg)`. Two extras finish the look:
+[`pulse_segment`](crate::curve_map::pulse_segment) is a **seam-free** per-cell glow that
+tapers to zero at a highlighted run's ends (so a selection blends into the curve), and
+[`draw_region_outline`](crate::curve_map::draw_region_outline) traces a **rounded outline**
+around an arbitrary region of cells (marching-squares over `inside(x,y)`, reusing the
+[`junction`](crate::junction) resolver for tees and crossings) — for subnet / group boundaries.
+
+```rust
+use mullion::curve_map::{fit_dims, render};
+use mullion::spacefill::Gilbert;
+use mullion::style::Color;
+use mullion::{Buffer, Rect};
+
+fn draw_map(buf: &mut Buffer, area: Rect, occupancy: &[u8]) {
+    let (w, h) = fit_dims(area, occupancy.len() as u128);
+    let g = Gilbert::new(w, h);
+    // Each grid cell d shows one item, coloured by the app — here a simple heat.
+    render(buf, area, &g, |d| {
+        let v = occupancy.get(d).copied().unwrap_or(0);
+        (Color::Rgb(v, v / 2, 0), Color::Reset) // (curve fg, cell bg)
+    });
+}
+```
+
+Worked demos: `examples/spacefill.rs` (holes bobbing under `masked_order` vs the continuous
+`spanning_curve` strand) and `examples/gilbert_map.rs` (the full occupancy-heatmap map look,
+with breathing, area-conserved holes and both the masked and strand modes). This is the
+engine behind canopy's IP-space map.
+
 ---
 
 ## 4. API reference by module
@@ -1608,6 +1676,8 @@ with ok/error/dim colours — census's LDIF change preview, AAA config diffs.
 | `diff` | `diff_lines` (LCS line diff), `render_diff_unified`, `DiffOp` |
 | `form` | `FormLayout` (`rows`), `FormRow`, `Validity`, `focus_step`, `render_validity` |
 | `outline` | `render_tree_row`, `render_more_row` (windowed-child "… N more" affordance), `tree_prefix` |
+| `spacefill` | `Gilbert` (`new`, `d_to_xy`, `xy_to_d`, `len`, `cells`, `masked_order`, `subblocks`, `subblock_at`), `gilbert_cells`, `gilbert_d2xy`, `strictly_continuous`, `spanning_curve`, `region_feasibility`, `Feasibility`, `SubBlock` |
+| `curve_map` | `fit_dims`, `cell_glyph`, `render`, `pulse_segment`, `draw_region_outline` (all `curve_map`-scoped, not re-exported) |
 
 `Tree` methods worth knowing: `focus_set`/`focus_next`/`focus_prev`/`focus_first`/
 `focus_last`/`ensure_focus_valid`, `focus_dir`/`focus_dir_cross`,
@@ -1908,210 +1978,94 @@ optimizations (shorter frames) this is the whole responsiveness story: faster fr
 
 ## 6. Example programs
 
-**`examples/quickstart.rs`** — the compilable version of the §2 getting-started
-snippet.  Uses `Buffer::empty` and an in-memory render (no real terminal needed):
+The `examples/` directory is a working tour of mullion's real capabilities: 24 runnable programs, each exercising a specific slice of the engine — from a one-screen quickstart to bidi text runaround, virtualized 100k-row tables, a grid-A\* connector router, a synthesised-or-real-footage TV, and locality-preserving space-filling curves. The flagship stress demo, `spiral_stress`, lives in the sibling **aerie** repo and is what the author reaches for to *wow* — but it leans on only a fraction of what these examples show individually. Run any of them with `cargo run --example <name>` (add `--release` for the animated ones).
 
-```text
-cargo run --example quickstart
-```
+### Getting started
 
-**`examples/smoke.rs`** (the Phase 0 smoke test — a minimal buffer render) and
-**`examples/demo.rs`** (an interactive walkthrough of Phases 1–5) are the basic
-sanity check and guided tour:
+- **quickstart** — `cargo run --example quickstart`
+  The compilable twin of the manual's §2 "Getting started" snippet. Builds a header/sidebar/main layout from `Node::Split` with `Constraint`/`Size::{Fixed,Fill}`, resolves it with `layout::solve` (tree → `[(TileId, Rect)]`), draws borders with `border::frame_tiles` (returning tile interiors), and paints into a headless `Buffer::empty` — so it runs without a terminal. The canonical "what does mullion code look like" example.
 
-```text
-cargo run --example smoke
-cargo run --example demo
-```
+- **smoke** — `cargo run --example smoke`
+  Phase 0 sanity check. Enters the alternate screen, draws wide graphemes and combining marks, prints the terminal dimensions, and redraws on resize. The smallest end-to-end use of the `Terminal` + backend + event loop.
 
-**`examples/showcase.rs`** — a full runnable monitor: `render_shared` header strip,
-vertical smooth-scrolling `Carousel` with `render_carousel`, marquee top-border
-labels, upright units labels, arrow-key focus, Heavy-border focus highlight,
-Enter/Esc zoom, virtualization, and render-tick animation:
+### Layout & tiling
 
-```text
-cargo run --example showcase
-```
+- **demo** — `cargo run --example demo`
+  Phases 1–5 interactive layout. Three top panes over a horizontal **carousel** where only 3 of 5 tiles fit; navigating into off-screen tiles scrolls them in via `Tree::scroll_focus_into_view`. Demonstrates `^W`-prefixed focus movement (DFS order) and pane zoom/unzoom (`^W z` / `^W Z`).
 
-`showcase.rs` is the reference for the `render_carousel` ↔ `render_shared` composition.
+- **showcase** — `cargo run --example showcase`
+  A single demo of mullion's most distinctive rendering features: `render_carousel` (smooth-scroll with tiles genuinely cut off at the edge, drawing only visible children), `render_shared` (shared header borders with `┼` junctions), `draw_label` as both a horizontal marquee and vertical upright-stacked text on a border, per-tile `LineWeight::{Heavy,Light}`, `zoom_focus`/`zoom_out`, and a per-frame animated bar whose cost is bounded by the diff engine flushing only changed cells.
 
-**`examples/floating.rs`** — the §3.15 foundation: two floating tiles over a
-parent, with the free space shaded live (free cells as dots, the gutter band
-distinct). Move a float with `hjkl`/arrows, switch with `Tab`, change the gutter
-with `[`/`]`; the free space re-solves every frame.
+- **autolayout** — `cargo run --example autolayout`
+  Phase 12 Sugiyama (layered) auto-layout. Press `a` and a directed graph (with a cycle, to exercise cycle-breaking) glides into crossing-minimized layers, written back into the same `GraphCanvas` manual drag uses; `r` refines by greedy hill-climb, `n` anneals out of local minima, `w` cycles learned weight "tastes". The result can run wider than the screen, so it lives on a pannable Phase 10 viewport.
 
-```text
-cargo run --example floating
-```
+- **zoom** — `cargo run --example zoom`
+  Phase 11 semantic (level-of-detail) zoom. A grid laid out by `layout::solve`; zooming eases the focused tile's `Fill` weight so the *solver itself* grows it while neighbours reflow. As the tile gains cells it crosses discrete LoD thresholds, swapping renderer: collapsed `·` → titled → titled+ports → a full internal wired node-graph.
 
-**`examples/text.rs`** — the §3.16 text engine: a paragraph mixing LTR English, a
-hard newline, and an RTL Arabic run, wrapped to an adjustable width. Arrow keys
-move the cursor *visually* while the status shows the *logical* index it maps to;
-`[`/`]` reflow the width; `p` toggles pagination ↔ scrolling.
+- **viewport** — `cargo run --example viewport`
+  Phase 10 graph viewport: 2D pan-and-cull over a logical canvas larger than the screen. Pan with keys, wheel, or drag; only nodes/wires intersecting the window (plus margin) are drawn. Because wires are routed in **canvas space**, tracks stay put rather than crawling, and **exact** scrollbars on both axes report true position.
 
-```text
-cargo run --example text
-```
+- **floating** — `cargo run --example floating`
+  Phase 1 foundation: two floating tiles placed by `FloatLayer::solve`, with the free space around them shaded live (`free_cells_in_window` plus a gutter band). Moving a float recomputes the shading every frame, bounded by the visible window. This is the free-space model the later text engine and connector router consume — visualized before either exists.
 
-**`examples/records.rs`** — the §3.17 virtual list: scroll a window over 100,000
-keyed records rendered through `ColumnGrid`, with a scrollbar that is solid when
-exact and a shade when estimated (press `e` to toggle the source).
+- **strips** — `cargo run --example strips`
+  1-row `Field`s that carry content along their length and across corners: a text marquee running a box's border perimeter (`Field::perimeter`) so the message rounds each corner unbroken, and a bent wire (`Field::strip` over an orthogonal path) carrying a flowing brightness wave via the video unit — content that rounds the wire's bends just as the marquee rounds the box's.
 
-```text
-cargo run --example records
-```
+### Text & documents
 
-**`examples/document.rs`** — the §3.18 wrapped-line virtualization: scroll and
-seek a ~60 KB flowed document while only the visible window is wrapped. The
-scrollbar is an estimate until the lazy index completes; press `G` to force a full
-index and watch it become exact. `[`/`]` change the wrap width (re-wraps, keeps
-position).
+- **text** — `cargo run --example text`
+  Phase 2 bidi-aware text engine core. Wraps a paragraph mixing LTR English and an RTL Arabic run to a live-adjustable width; the cursor steps **visually** (left is always one cell left) while the status line reports the **logical** index it maps to — the §3.2 logical↔visual bijection made visible. Press `p` to flip between continuous scrolling and fixed-height pages over the same wrapped model.
 
-```text
-cargo run --example document
-```
+- **document** — `cargo run --example document`
+  Phase 4 wrapped-line virtualization: scrolls and seeks through a large flowed document without ever wrapping the whole thing, building a byte-offset → wrapped-line index lazily. The scrollbar thumb is a `▒` **estimate** while partly indexed and flips to a solid `█` **exact** thumb once fully indexed (press `G` to force it) — the honest exact/estimate distinction.
 
-**`examples/runaround.rs`** — the §3.19 runaround: a paragraph flows around a
-movable floating figure. Move the figure (`hjkl`/arrows) and the visible rows
-reflow; `[`/`]` change the gutter; `d` flips LTR ↔ RTL to show the within-row
-slot-order flip.
+- **runaround** — `cargo run --example runaround`
+  Phase 5 word-wrap runaround: a paragraph flows around a movable floating "figure", reflowing live and bounded by visible rows. The free space is exactly the Phase 1 slot model; wrapping is the Phase 2 engine. Press `d` to flip base direction and watch the within-row slot fill order (left-of-tile first under LTR, right-of-tile first under RTL) reverse.
 
-```text
-cargo run --example runaround
-```
+- **runaround_multi** — `cargo run --example runaround_multi`
+  The multi-tile runaround: three tiles carve holes out of one paragraph that mixes English and Arabic, so you see bidi reordering *within* each slot plus the base-direction flip reordering the slots themselves. Demonstrates that text flow, hole avoidance, and bidi compose.
 
-**`examples/runaround_multi.rs`** — runaround (§3.19) around **three** tiles at
-once, with a paragraph mixing LTR English and RTL Arabic. `Tab` selects a tile,
-`hjkl`/arrows move it (all rows reflow), `[`/`]` change the gutter, `d` flips
-LTR ↔ RTL. Exercises both the per-screen terminal-bidi handling (§3.16) and the
-words-kept-whole flow (§3.19).
+### Data & virtualization
 
-```text
-cargo run --example runaround_multi
-```
+- **records** — `cargo run --example records`
+  Phase 3 row virtualization: scrolls a window over **100,000** keyed records through a `RecordSource` while materializing only a few dozen rows, drawn via `table::ColumnGrid`. Press `e` to swap an exact source for an *estimated* one (length unknown, like a remote cursor) and the scrollbar thumb changes from a solid `█` at a true ordinal to a `▒` shade — never faking precision it doesn't have.
 
-**`examples/sockets.rs`** — the §3.20 sockets: a node with input sockets down its
-left edge and outputs down its right, each a bookended gap in the border (`┴●┬`)
-with a circle terminal — `●` connected (the circle pulses with the flow gradient),
-`○` idle. `↑`/`↓` change the socket count; `space` pauses (and toggles the look).
+### Graph, sockets & routing
 
-```text
-cargo run --example sockets
-```
+- **sockets** — `cargo run --example sockets`
+  Phase 6 sockets/ports: a bordered node with sockets carved into its edges as bookended border gaps (`┴●┬`), `●` connected / `○` idle, the terminal glowing with the streaming flow gradient when connected. The geometry is pinned; only the gradient animates as the loop advances its clock.
 
-**`examples/graph.rs`** — the §3.21 graph canvas: three nodes (each carrying
-sockets) you can `Tab`-select and nudge with the arrows/`hjkl`, snap to the grid
-with `s`, or drag with the mouse. Nodes stay inside the canvas.
+- **graph** — `cargo run --example graph`
+  Phase 7 manual node placement on a `GraphCanvas`: nodes are bordered tiles carrying Phase 6 sockets, selectable with `Tab`, nudgeable with `hjkl`, grid-snappable with `s`, or draggable with the mouse. Nodes keep stable ids and stay in bounds; sockets show where wires will later attach.
 
-```text
-cargo run --example graph
-```
+- **wires** — `cargo run --example wires`
+  Phase 9 connector routing: three nodes wired in a triangle, routed *together* with grid A\* over the free cells (bend penalty against long "train-track" runs). Parallel wires nudge onto separate tracks, crossings are biased away, and each net gets its own colour so a `┼` reads by following the hue. Drag a node and the wires reroute and re-nudge live.
 
-**`examples/wires.rs`** — the §3.22 connector routing: three nodes wired in a
-triangle, each connector a distinct net colour, routed together with grid A\* so
-parallel wires nudge onto separate tracks and crossings (`┼`) are biased away.
-Drag a node (or nudge it) and the coloured wires reroute and re-nudge live.
+- **teach** — `cargo run --example teach`
+  The learnable-layout finale. The engine lays out a small graph (Sugiyama → anneal under current `ScoreWeights`) with sockets and colour-per-net orthogonal wires; you drag nodes to improve it, then press `t` to record `(machine, yours)` as a preference pair and re-fit the weights. Press `a` to re-lay-out under your learned taste — less fixing each round. Wires re-route only when a node actually moves (cached otherwise), keeping drag responsive.
 
-**`examples/viewport.rs`** — the §3.23 graph viewport: a graph on a canvas larger
-than the screen. Pan with arrows/`hjkl`, mouse drag, or the wheel; off-window nodes
-and wires are culled; exact scrollbars on both axes; the canvas-space routes stay
-put as you scroll.
+### Fields, colour & video
 
-```text
-cargo run --example viewport
-```
+- **colorfield** — `cargo run --example colorfield`
+  Colour *sources* driving a `Field`'s colour independently of its glyphs: a `Flame` cellular automaton, a Gray-Scott `Reaction`-diffusion (Turing patterns), and an analytic `Wave` plasma, each mapped through a `Palette`. Toggle the glyph between brightness blocks (see the source's shape) and tiled text (colour shining *through* the letters) — glyph and colour are separate layers.
 
-```text
-cargo run --example wires
-```
+- **video** — `cargo run --example video`
+  The **video unit**: an intensity image (an animated plasma) drawn into a `Field` three ways — **braille** (2×4 ordered-dithered sub-pixels), **ramp** (`░▒▓█` per cell), and structure-aware **glyphs** (flat cells get a brightness block, edge cells a directional stroke `─│╱╲` tracing the contour). A separate colour layer (grey, value→hue, or scene-by-*position* via the `_xy` encoder variants) shines through the shape.
 
-**`examples/zoom.rs`** — the §3.24 semantic zoom: a grid of tiles where the focused
-one grows through the layout solver and crosses LoD thresholds (collapsed → titled →
-ported → full internal graph). `Tab` focuses, `space`/`z` zoom in/out.
+- **tv** — `cargo run --example tv [-- clip.mp4]`
+  A TV for the `Video` widget. With no argument it plays a synthesised signal (colour bars, luma ramp, bouncing highlight); pass a file and it spawns `ffmpeg … -pix_fmt rgb24 -f rawvideo -` and plays real footage — mullion never decodes video itself. Live-cycle `Encoding` (braille → half-block → luma-chroma → sextant), `dither` (Bayer → Floyd–Steinberg → temporal), sampling, colour depth (truecolor → 256 → 16), and CRT `Filter`s (scanlines, vignette, phosphor, gamma, saturation, grey).
 
-```text
-cargo run --example zoom
-```
+### Space-filling curves
 
-**`examples/autolayout.rs`** — the §3.25 Sugiyama auto-layout and §3.27 refinement:
-a directed graph (with one cycle) that you scatter (`s`), lay out (`a`) into clean
-left-to-right layers, then **refine** (`r`, greedy) or **anneal** (`n`, escapes
-local minima) to polish — nodes glide into place and the status line shows crossings,
-score, and wire length dropping. `w` cycles the default weights and two *learned*
-tastes (few-crossings / short-wires), re-refining so you see learned taste change the
-layout. Pannable canvas.
+- **spacefill** — `cargo run --example spacefill`
+  An address landscape over an allowed/forbidden grid. A 1-D line of addresses is laid on a generalized Hilbert (**Gilbert**) curve but only over allowed cells, via `Gilbert::masked_order`, so locality survives the holes — a contiguous run stays a compact blob (the bright sweeping window). Forbidden blocks bob, split, and recombine without overlapping, keeping the allowed area exactly constant; `i` inverts allowed/forbidden.
 
-```text
-cargo run --example autolayout
-```
+- **gilbert_map** — `cargo run --example gilbert_map`
+  The canopy IP-map aesthetic driven entirely by mullion's Gilbert work. Cell backgrounds are a log-scaled occupancy heatmap; foregrounds draw each cell's segment of the *actual* curve with rounded box-drawing glyphs, so the serpentine path is visible rather than imagined. Holes "breathe" in paired opposition at constant total area; `c` switches between `masked` mode (the threaded line skips holes via `masked_order`) and `strand` mode (a continuous spanning-tree cycle, `spanning_curve`, routes *around* holes as one unbroken curve).
 
-**`examples/video.rs`** — the §3.26 Field video unit: an animated plasma sampled as
-an image and drawn into a `Field`, cycling (`space`) through the three encoders —
-dithered braille, density ramp, structure-aware glyphs — with a separable value→hue
-colour layer (`c` toggles colour).
+### The flagship: spiral_stress (in aerie)
 
-```text
-cargo run --example video
-```
-
-**`examples/strips.rs`** — the §3.26 strip primitives: a text **marquee** running
-around a box's border perimeter (turning every corner) and a **video brightness wave**
-flowing along a bent wire — content carried along a path, corners and bends included.
-
-```text
-cargo run --example strips
-```
-
-**`examples/colorfield.rs`** — the §3.26 colour sources: a `Flame` cellular automaton,
-a `Reaction`-diffusion automaton (Gray-Scott spots / mitosis / maze / coral), and an
-analytic `Wave` driving a `Field`'s colour through a `Palette`, independently of the
-glyph (`s` source, `p` palette, `t` blocks ↔ text, `r` reseed).
-
-```text
-cargo run --example colorfield
-```
-
-**`examples/tv.rs`** — the §3.28 `Video` widget: a synthesised colour-bar signal (or
-**real footage** via `cargo run --example tv -- clip.mp4`, decoded by `ffmpeg`),
-reproduced faithfully in truecolour, with `e` to cycle braille/half-block/luma-chroma/sextant
-encoding, `d` to switch Bayer/Floyd–Steinberg dither, `n` to switch bilinear/nearest
-sampling,
-`c` to drop colour depth (truecolor → 256 → 16 — fewer output bytes on a huge,
-I/O-bound screen), and `1`–`6` to toggle the CRT/grading filters.
-
-```text
-cargo run --example tv
-```
-
-**`examples/teach.rs`** — the §3.27 learnable layout, interactive: the engine lays a
-small graph out (sockets + orthogonal colour-per-net wires), you **drag nodes** to
-improve it, `t` teaches the engine that correction (re-fitting the weights), and `a`
-re-lays-out under your learned taste. The header shows the learned **emphasis** (each
-term's share) shifting as you teach. Corrections are **saved to disk and reloaded on
-startup** (`~/.mullion-teach-lessons.txt`), so the taste accumulates across runs —
-mullion supplies the learning; persistence is the app's choice.
-
-```text
-cargo run --example teach
-```
-
-**`examples/spiral_stress.rs`** (in the `aerie` crate) — an animated stress test
-and visual demo.  Draws a stack of nested frames arranged like a Fibonacci /
-golden-rectangle spiral that continuously uncurls and re-curls the other way
-(Electric Sheep style).  Each border is a closed perimeter loop with three
-Gaussian color bumps travelling around it at different speeds and directions.
-The gaps in each border carry streaming ◻ bands with independent per-band colors.
-Swarm mode tiles the screen with many spirals via `layout::solve`; animated zoom
-eases a `Fill` weight to grow one tile to fill the screen and back.
-
-The example exercises `ease::smoothstep` (animated zoom), `ease::gaussian`
-(border color bumps), `Rect::border_pos` (perimeter loop geometry), and
-`Color::from_hsv` (hue-shift palette) — all the §3.11 animation helpers.
-
-```text
-cargo run --release --example spiral_stress        # single spiral
-cargo run --release --example spiral_stress --swarm  # swarm + zoom
-```
+`spiral_stress` lives in the **aerie** repo (`aerie/examples/spiral_stress.rs`), not in mullion, and depends only on `mullion` + `crossterm`. Run it with `cargo run --release --example spiral_stress [--swarm]`. Its default **reflow-field** scene is a recursive fractal of wandering windows — every box at every level is filled with re-flowing `text::wrap` paragraphs coloured through a `Field`/`Wave`, or a little braille TV from the `Video` widget, carries 4–8 bookended border gaps sliding across corners via `Field::perimeter`, and nests four more windows 3–4 levels deep. The **swarm** scene tiles many golden-spiral figures laid out by `layout::solve` and demonstrates *animated* zoom (easing a tile's `Fill` weight through the solver rather than the discrete `Tree::zoom_to` jump). It doubles as a stress test: every frame fully repaints the screen cell-by-cell, with a HUD cell-write counter as a throughput proxy — crank depth with `+/-` or switch to swarm to push it harder.
 
 ---
 
@@ -2174,6 +2128,16 @@ design — not in v1.
 **Field** direction — one surface for video (the braille / ramp / glyph encoders),
 and the substrate for corner-crossing gaps and content-carrying wires (strips), and
 cellular-automata / wave colour sources. Not part of the 13-phase plan.
+
+`mullion::spacefill` + `mullion::curve_map` (§3.30) are a **space-filling-curve map**
+direction: the generalized-Hilbert (Gilbert) curve fills any `width × height` rectangle
+while keeping locality (`gilbert_cells`, `Gilbert`), with holes (`masked_order`), a
+continuous strand around holes (`spanning_curve` + the `region_feasibility` gate), and the
+curve's own quadrant partition (`subblocks`). `curve_map` turns that geometry into a drawn
+map — `fit_dims`/`cell_glyph`/`render`, the seam-free `pulse_segment` highlight, and
+`draw_region_outline` for arbitrary region boundaries — content-agnostic, so an app supplies
+only what a cell means. It is the engine behind canopy's IP-space map (see `examples/spacefill.rs`
+and `examples/gilbert_map.rs`). Not part of the 13-phase plan.
 
 `mullion::refine` (§3.27) is a **learnable-layout** direction: an explicit, weighted
 quality `score`, a local-search `refine` over it, and `learn_weights` that fits the

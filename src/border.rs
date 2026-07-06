@@ -680,9 +680,11 @@ impl BorderGap {
 /// overwritten by the animation.  Gaps with `rim_glow == true` are walked like any
 /// other border cell.
 ///
-/// This is a no-op for rects smaller than 2×2 (no distinct perimeter) and never
-/// panics.  Call it after the structural border pass and before the gap-content
-/// pass (the three-pass pattern documented on [`BorderGap`]).
+/// Walks whatever [`Rect::border_cells`] yields, so it only skips everything for a
+/// zero-area rect; a degenerate 1×N / N×1 rect has no distinct perimeter, so
+/// [`Rect::border_pos`] reports every cell at position `0.0` and the whole run is
+/// styled uniformly.  Never panics.  Call it after the structural border pass and
+/// before the gap-content pass (the three-pass pattern documented on [`BorderGap`]).
 pub fn render_rim(
     buf: &mut Buffer,
     rect: Rect,

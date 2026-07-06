@@ -44,6 +44,24 @@
 //! assert_eq!(x0.abs_diff(x1) + y0.abs_diff(y1), 1);
 //! ```
 //!
+//! ## Beyond the bare curve
+//!
+//! On top of the plain order, the module offers:
+//! - **Holes.** [`Gilbert::masked_order`] returns the curve order with a *forbidden* set of
+//!   cells removed — the line skips them while locality survives, so a map can carve out
+//!   excluded regions of any shape.
+//! - **A continuous strand through holes.** [`spanning_curve`] builds a guaranteed
+//!   4-connected Hamiltonian cycle over the allowed cells of a 2×2-block-aligned mask, and
+//!   [`region_feasibility`] is the exact gate (connectivity + checkerboard parity) deciding
+//!   whether such a strand can exist at all.
+//! - **The curve's own quadrants.** [`Gilbert::subblocks`] exposes the top-level recursive
+//!   partition as contiguous [`SubBlock`]s (each a `d`-interval + its sub-rectangle) — the
+//!   atoms of a step-through / zoom-into-a-region chooser; [`Gilbert::subblock_at`] maps a
+//!   line index back to its piece.
+//!
+//! For turning any of this into a drawn map — grid sizing, curve glyphs, occupancy colour,
+//! region outlines — see the higher-level [`curve_map`](crate::curve_map) module.
+//!
 //! [Hilbert curve]: https://en.wikipedia.org/wiki/Hilbert_curve
 
 use crate::geometry::Rect;
