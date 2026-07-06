@@ -34,8 +34,10 @@
 //! curve_map::render(&mut buf, area, &g, |_d| (Color::Rgb(220, 220, 220), Color::Reset));
 //! ```
 
+use crate::border::{BorderStyle, CornerStyle, LineWeight};
 use crate::buffer::Buffer;
 use crate::geometry::Rect;
+use crate::junction::{resolve, EdgeGrid};
 use crate::spacefill::Gilbert;
 use crate::style::{Color, Style};
 
@@ -258,6 +260,94 @@ pub fn pulse_segment(len: usize, seg: core::ops::Range<usize>, t: f32, taper: us
     }
 }
 
+/// Draw a **rounded outline around an arbitrary region** of cells — not just a rectangle —
+/// tracing the boundary between `inside` and outside cells with light box-drawing glyphs.
+///
+/// `inside(x, y)` reports whether the buffer cell `(x, y)` belongs to the region. The outline
+/// is laid on the ring of cells **just outside** the region (so it frames without overwriting
+/// the region's own content): a straight run is `─`/`│`, a corner is `╭ ╮ ╰ ╯` (for a
+/// [`Light`](LineWeight::Light) + [`Rounded`](CornerStyle::Rounded) `style`; other weights use
+/// their square/heavy/double corners, per `border`'s rounded-is-Light-only rule), and where
+/// the boundary branches it resolves to `├ ┤ ┬ ┴ ┼` via [`junction::resolve`](crate::junction::resolve).
+/// A compact region gets a single closed loop; a lone cell gets a tiny 3×3 box.
+///
+/// The outline is clipped to `area`; a region flush against `area`'s edge loses the outline
+/// on that side (leave a one-cell margin). `style.style` gives the glyph colour.
+///
+/// ```
+/// use mullion::curve_map::draw_region_outline;
+/// use mullion::border::{BorderStyle, CornerStyle, LineWeight};
+/// use mullion::style::Style;
+/// use mullion::{Buffer, Rect};
+///
+/// let area = Rect::new(0, 0, 8, 8);
+/// let mut buf = Buffer::empty(area);
+/// // Outline a single cell → a tiny rounded box around it.
+/// let style = BorderStyle { weight: LineWeight::Light, corners: CornerStyle::Rounded, style: Style::default() };
+/// draw_region_outline(&mut buf, area, |x, y| (x, y) == (3, 3), &style);
+/// assert_eq!(buf.get(2, 2).symbol, "╭"); // top-left of the ring
+/// assert_eq!(buf.get(4, 4).symbol, "╯"); // bottom-right
+/// assert_eq!(buf.get(3, 3).symbol, " "); // the region's own cell is untouched (blank)
+/// ```
+pub fn draw_region_outline(buf: &mut Buffer, area: Rect, inside: impl Fn(u16, u16) -> bool, style: &BorderStyle) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    // Signed, bounds-safe membership test — neighbours may step off the plane.
+    let ins = |x: i64, y: i64| -> bool {
+        (0..=i64::from(u16::MAX)).contains(&x)
+            && (0..=i64::from(u16::MAX)).contains(&y)
+            && inside(x as u16, y as u16)
+    };
+
+    // Accumulate the outline as unit arm-segments on the outside ring: an east arm on the
+    // edge (x,y)–(x+1,y) when both cells are outside and the region lies on exactly one side
+    // of that horizontal segment; symmetrically a south arm. `EdgeGrid` merges the arms and
+    // forms the junctions; the arithmetic runs in i64 so `x-1`/`y-1` never underflow.
+    let mut grid = EdgeGrid::new(area);
+    let (x0, y0) = (i64::from(area.x), i64::from(area.y));
+    let (x1, y1) = (x0 + i64::from(area.width), y0 + i64::from(area.height));
+    for y in y0..y1 {
+        for x in x0..x1 {
+            if !ins(x, y) && !ins(x + 1, y) {
+                let above = ins(x, y - 1) || ins(x + 1, y - 1);
+                let below = ins(x, y + 1) || ins(x + 1, y + 1);
+                if above != below {
+                    grid.add_h_line(x as u16, x as u16 + 1, y as u16, style.weight);
+                }
+            }
+            if !ins(x, y) && !ins(x, y + 1) {
+                let left = ins(x - 1, y) || ins(x - 1, y + 1);
+                let right = ins(x + 1, y) || ins(x + 1, y + 1);
+                if left != right {
+                    grid.add_v_line(y as u16, y as u16 + 1, x as u16, style.weight);
+                }
+            }
+        }
+    }
+
+    // Resolve each cell's arms to a glyph; round the light corners when asked.
+    let rounded = matches!((style.weight, style.corners), (LineWeight::Light, CornerStyle::Rounded));
+    for y in area.y..area.y + area.height {
+        for x in area.x..area.x + area.width {
+            let Some(cell) = grid.get(x, y) else { continue };
+            let Some(ch) = resolve(cell) else { continue };
+            let ch = if rounded {
+                match ch {
+                    '┌' => '╭',
+                    '┐' => '╮',
+                    '└' => '╰',
+                    '┘' => '╯',
+                    other => other,
+                }
+            } else {
+                ch
+            };
+            buf.set_char(x, y, ch, style.style);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -378,5 +468,75 @@ mod tests {
                 }
             }
         }
+    }
+
+    // ── draw_region_outline ──
+
+    fn light_rounded() -> BorderStyle {
+        BorderStyle { weight: LineWeight::Light, corners: CornerStyle::Rounded, style: Style::default() }
+    }
+
+    fn sym(buf: &Buffer, x: u16, y: u16) -> String {
+        buf.get(x, y).symbol.clone()
+    }
+
+    #[test]
+    fn one_cell_region_is_a_tiny_rounded_box() {
+        let area = Rect::new(0, 0, 8, 8);
+        let mut buf = Buffer::empty(area);
+        draw_region_outline(&mut buf, area, |x, y| (x, y) == (3, 3), &light_rounded());
+        // A clean 3×3 box on the ring around (3,3); the region cell itself untouched.
+        assert_eq!(sym(&buf, 2, 2), "╭");
+        assert_eq!(sym(&buf, 3, 2), "─");
+        assert_eq!(sym(&buf, 4, 2), "╮");
+        assert_eq!(sym(&buf, 2, 3), "│");
+        assert_eq!(sym(&buf, 3, 3), " "); // region cell blank (untouched)
+        assert_eq!(sym(&buf, 4, 3), "│");
+        assert_eq!(sym(&buf, 2, 4), "╰");
+        assert_eq!(sym(&buf, 3, 4), "─");
+        assert_eq!(sym(&buf, 4, 4), "╯");
+    }
+
+    #[test]
+    fn rectangle_region_is_a_rounded_box_just_outside() {
+        let area = Rect::new(0, 0, 12, 10);
+        let mut buf = Buffer::empty(area);
+        // Region cells x∈4..=6, y∈4..=5 → outline ring at x∈3..=7, y∈3..=6.
+        let inside = |x: u16, y: u16| (4..=6).contains(&x) && (4..=5).contains(&y);
+        draw_region_outline(&mut buf, area, inside, &light_rounded());
+        assert_eq!(sym(&buf, 3, 3), "╭");
+        assert_eq!(sym(&buf, 7, 3), "╮");
+        assert_eq!(sym(&buf, 3, 6), "╰");
+        assert_eq!(sym(&buf, 7, 6), "╯");
+        assert_eq!(sym(&buf, 4, 3), "─"); // a top-edge run
+        assert_eq!(sym(&buf, 3, 4), "│"); // a left-edge run
+        assert_eq!(sym(&buf, 5, 5), " "); // region interior untouched (blank)
+    }
+
+    #[test]
+    fn l_shaped_region_is_a_single_closed_loop() {
+        let area = Rect::new(0, 0, 18, 18);
+        let mut buf = Buffer::empty(area);
+        // A fat L: a 6×6 block (x,y ∈ 5..=10) minus its top-right 3×3 (x ∈ 8..=10, y ∈ 5..=7).
+        let inside = |x: u16, y: u16| {
+            let block = (5..=10).contains(&x) && (5..=10).contains(&y);
+            let notch = (8..=10).contains(&x) && (5..=7).contains(&y);
+            block && !notch
+        };
+        draw_region_outline(&mut buf, area, inside, &light_rounded());
+        // A single closed loop: every drawn glyph is a 2-arm stroke (straight or rounded
+        // corner) — no ├┤┬┴┼ junction and no dangling stub anywhere on the outline.
+        let mut drawn = 0;
+        for y in 0..18 {
+            for x in 0..18 {
+                let s = sym(&buf, x, y);
+                if s.is_empty() || s == " " {
+                    continue; // a blank (untouched) cell
+                }
+                drawn += 1;
+                assert!(matches!(s.as_str(), "─" | "│" | "╭" | "╮" | "╰" | "╯"), "junction/stub {s:?} at {x},{y}");
+            }
+        }
+        assert!(drawn > 12, "expected a sizeable single loop, got {drawn} cells");
     }
 }
