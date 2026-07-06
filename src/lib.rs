@@ -49,6 +49,7 @@ pub mod buffer;
 pub mod capabilities;
 pub mod charset;
 pub mod colorfield;
+pub mod curve_map;
 pub mod diff;
 pub mod docview;
 pub mod ease;
