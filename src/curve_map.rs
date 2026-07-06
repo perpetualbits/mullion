@@ -219,6 +219,45 @@ pub fn render(buf: &mut Buffer, area: Rect, g: &Gilbert, paint: impl Fn(usize) -
     }
 }
 
+/// A per-cell **glow** for a highlighted run `seg` of a length-`len` curve, so a selected
+/// segment brightens with no visible seam where it meets its neighbours on the curve.
+///
+/// The returned closure maps a cell index `d` to a glow in `[0, 1]`: exactly `0` outside
+/// `seg` **and at `seg`'s two end cells**, ramping smoothly (a [`smoothstep`](crate::ease::smoothstep)
+/// over `taper` cells at each end) up to a time-varying pulse in the middle. It is a boost,
+/// not a replacement — apply it as `luma * (1.0 + glow)` (or add it), so cells outside `seg`
+/// are untouched and the highlight fades into the curve rather than ending on a hard edge.
+///
+/// `t` advances the pulse (call once per frame for the current time); `taper` is clamped to
+/// `≥ 1` so the ends always reach `0`. The result is finite and non-negative for every `t`.
+///
+/// ```
+/// use mullion::curve_map::pulse_segment;
+///
+/// let glow = pulse_segment(100, 20..40, 1.3, 4);
+/// assert_eq!(glow(10), 0.0); // before the segment: untouched
+/// assert_eq!(glow(20), 0.0); // first cell of the segment: seam-free start
+/// assert_eq!(glow(39), 0.0); // last cell: seam-free end
+/// assert!(glow(30) >= 0.0);  // the middle glows (0 only at the pulse's trough)
+/// ```
+#[must_use]
+pub fn pulse_segment(len: usize, seg: core::ops::Range<usize>, t: f32, taper: usize) -> impl Fn(usize) -> f32 {
+    let lo = seg.start.min(len);
+    let hi = seg.end.min(len);
+    let taper = taper.max(1) as f32;
+    // A smooth, always-non-negative breathing pulse in `[0, 1]` (0 at the trough).
+    let pulse = 0.5 - 0.5 * t.cos();
+    move |d: usize| -> f32 {
+        if d < lo || d >= hi {
+            return 0.0;
+        }
+        // Distance to the nearer end of the segment — symmetric by construction.
+        let edge = (d - lo).min(hi - 1 - d);
+        let ramp = crate::ease::smoothstep((edge as f32 / taper).clamp(0.0, 1.0));
+        pulse * ramp
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -305,5 +344,39 @@ mod tests {
     fn lone_cell_is_a_dot() {
         let g = Gilbert::new(1, 1);
         assert_eq!(cell_glyph(&g, 0), '·');
+    }
+
+    proptest! {
+        /// `pulse_segment`'s glow is finite and non-negative everywhere, exactly `0` outside
+        /// the segment and at its two end cells, and symmetric about the segment's middle.
+        #[test]
+        fn pulse_segment_is_seam_free_and_bounded(
+            len in 1usize..300,
+            start in 0usize..300,
+            span in 0usize..80,
+            taper in 0usize..30,
+            t in -50.0f32..50.0,
+        ) {
+            let lo = start.min(len);
+            let hi = (start + span).min(len);
+            let glow = pulse_segment(len, lo..hi, t, taper);
+
+            for d in 0..len {
+                let g = glow(d);
+                prop_assert!(g.is_finite() && g >= 0.0, "glow {} at d={} not finite/non-negative", g, d);
+                if d < lo || d >= hi {
+                    prop_assert_eq!(g, 0.0, "glow nonzero outside seg at d={}", d);
+                }
+            }
+            if hi > lo {
+                prop_assert_eq!(glow(lo), 0.0, "first cell of seg must be seam-free (0)");
+                prop_assert_eq!(glow(hi - 1), 0.0, "last cell of seg must be seam-free (0)");
+                // Symmetric: the k-th cell from each end glows identically.
+                let last = hi - 1 - lo;
+                for k in 0..=last {
+                    prop_assert!((glow(lo + k) - glow(hi - 1 - k)).abs() < 1e-6, "asymmetric at k={}", k);
+                }
+            }
+        }
     }
 }

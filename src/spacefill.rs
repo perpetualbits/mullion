@@ -46,6 +46,8 @@
 //!
 //! [Hilbert curve]: https://en.wikipedia.org/wiki/Hilbert_curve
 
+use crate::geometry::Rect;
+
 /// `-1`, `0`, or `+1` — the sign of `x`, as the unit step along an axis.
 fn sgn(x: i32) -> i32 {
     (x > 0) as i32 - (x < 0) as i32
@@ -116,6 +118,74 @@ fn gen2d(x: i32, y: i32, ax: i32, ay: i32, bx: i32, by: i32, out: &mut Vec<(u32,
             out,
         );
     }
+}
+
+/// The axis-aligned bounding [`Rect`] of the region rooted at `(x, y)` and spanned by the
+/// major `(ax, ay)` and minor `(bx, by)` axis vectors — the rectangle its cells fill.
+/// `(x, y)` is one corner; the far corner is `w-1` major steps and `h-1` minor steps away.
+fn region_bounds(x: i32, y: i32, ax: i32, ay: i32, bx: i32, by: i32) -> Rect {
+    let (w, h) = ((ax + ay).abs(), (bx + by).abs());
+    let (dax, day) = (sgn(ax), sgn(ay));
+    let (dbx, dby) = (sgn(bx), sgn(by));
+    let fx = x + (w - 1) * dax + (h - 1) * dbx;
+    let fy = y + (w - 1) * day + (h - 1) * dby;
+    let (x0, x1) = (x.min(fx), x.max(fx));
+    let (y0, y1) = (y.min(fy), y.max(fy));
+    Rect::new(x0 as u16, y0 as u16, (x1 - x0 + 1) as u16, (y1 - y0 + 1) as u16)
+}
+
+/// The **one-level** split [`gen2d`] would make of the region `(x, y, ax, ay, bx, by)`: the
+/// sub-pieces in curve order, each `(x, y, ax, ay, bx, by)`. Two pieces for a long rectangle
+/// (`2w > 3h`, split the major axis in half), three for the squarer case (the down-across-up
+/// split), or the region itself when it is a single row/column. Mirrors `gen2d`'s arithmetic
+/// exactly so the pieces line up with the enumerated order.
+#[allow(clippy::type_complexity)]
+fn top_pieces(x: i32, y: i32, ax: i32, ay: i32, bx: i32, by: i32) -> Vec<(i32, i32, i32, i32, i32, i32)> {
+    let (w, h) = ((ax + ay).abs(), (bx + by).abs());
+    if w == 1 || h == 1 {
+        return vec![(x, y, ax, ay, bx, by)]; // a single row/column does not subdivide
+    }
+    let (dax, day) = (sgn(ax), sgn(ay));
+    let (dbx, dby) = (sgn(bx), sgn(by));
+    let (mut ax2, mut ay2) = (ax >> 1, ay >> 1);
+    let (mut bx2, mut by2) = (bx >> 1, by >> 1);
+    let (w2, h2) = ((ax2 + ay2).abs(), (bx2 + by2).abs());
+
+    if 2 * w > 3 * h {
+        if w2 % 2 != 0 && w > 2 {
+            ax2 += dax;
+            ay2 += day;
+        }
+        vec![(x, y, ax2, ay2, bx, by), (x + ax2, y + ay2, ax - ax2, ay - ay2, bx, by)]
+    } else {
+        if h2 % 2 != 0 && h > 2 {
+            bx2 += dbx;
+            by2 += dby;
+        }
+        vec![
+            (x, y, bx2, by2, ax2, ay2),
+            (x + bx2, y + by2, ax, ay, bx - bx2, by - by2),
+            (
+                x + (ax - dax) + (bx2 - dbx),
+                y + (ay - day) + (by2 - dby),
+                -bx2,
+                -by2,
+                -(ax - ax2),
+                -(ay - ay2),
+            ),
+        ]
+    }
+}
+
+/// One top-level piece of a Gilbert curve — a **contiguous** run of line indices and the
+/// sub-rectangle it fills. The atoms of a "step through / zoom into a quadrant" chooser:
+/// [`subblocks`](Gilbert::subblocks) returns the whole set, in curve order.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SubBlock {
+    /// The contiguous line-index interval this piece covers, `⊆ 0..len`.
+    pub d_range: core::ops::Range<usize>,
+    /// The grid cells (in cell coordinates) the piece fills.
+    pub bounds: Rect,
 }
 
 /// The full Gilbert visiting order for a `width × height` grid: `cells[d]` is the grid
@@ -315,6 +385,55 @@ impl Gilbert {
     #[must_use]
     pub fn masked_order(&self, allowed: impl Fn(u32, u32) -> bool) -> Vec<(u32, u32)> {
         self.forward.iter().copied().filter(|&(x, y)| allowed(x, y)).collect()
+    }
+
+    /// The curve's own **top-level partition** into [`SubBlock`]s, in curve order: two pieces
+    /// for a long rectangle (the major axis halved), three for the squarer down-across-up
+    /// case, or a single piece for a one-row/column grid. Together the pieces tile the region
+    /// and partition `0..len` into contiguous `d`-intervals — the natural quadrants to step
+    /// through or zoom into. `O(1)` (a constant number of pieces; no enumeration).
+    ///
+    /// ```
+    /// use mullion::spacefill::Gilbert;
+    ///
+    /// let g = Gilbert::new(8, 8);
+    /// let parts = g.subblocks();
+    /// // The pieces partition every line index, contiguously and in order.
+    /// assert_eq!(parts.first().unwrap().d_range.start, 0);
+    /// assert_eq!(parts.last().unwrap().d_range.end, g.len());
+    /// let total: usize = parts.iter().map(|p| p.d_range.len()).sum();
+    /// assert_eq!(total, g.len());
+    /// ```
+    #[must_use]
+    pub fn subblocks(&self) -> Vec<SubBlock> {
+        if self.width == 0 || self.height == 0 {
+            return Vec::new();
+        }
+        let (w, h) = (self.width as i32, self.height as i32);
+        // Same entry orientation as the enumeration: major axis is the longer side.
+        let (x, y, ax, ay, bx, by) =
+            if self.width >= self.height { (0, 0, w, 0, 0, h) } else { (0, 0, 0, h, w, 0) };
+        let mut start = 0usize;
+        top_pieces(x, y, ax, ay, bx, by)
+            .into_iter()
+            .map(|(px, py, pax, pay, pbx, pby)| {
+                let area = ((pax + pay).abs() * (pbx + pby).abs()) as usize;
+                let sb = SubBlock { d_range: start..start + area, bounds: region_bounds(px, py, pax, pay, pbx, pby) };
+                start += area;
+                sb
+            })
+            .collect()
+    }
+
+    /// The index into [`subblocks`](Gilbert::subblocks) whose `d_range` contains `d` — which
+    /// top-level piece line index `d` falls in. Out-of-range `d` maps to the last piece.
+    #[must_use]
+    pub fn subblock_at(&self, d: usize) -> usize {
+        let parts = self.subblocks();
+        parts
+            .iter()
+            .position(|sb| sb.d_range.contains(&d))
+            .unwrap_or_else(|| parts.len().saturating_sub(1))
     }
 }
 
@@ -593,7 +712,47 @@ pub fn spanning_curve(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
     use std::collections::HashSet;
+
+    proptest! {
+        /// `subblocks` partition `0..len` into contiguous, in-order pieces whose bounds tile
+        /// the grid without overlap, and `subblock_at` agrees for every `d`.
+        #[test]
+        fn subblocks_partition_and_tile(w in 1u32..64, h in 1u32..64) {
+            let g = Gilbert::new(w, h);
+            let parts = g.subblocks();
+            prop_assert!(!parts.is_empty());
+
+            // Contiguous partition of `0..len`, in order.
+            let mut expect = 0usize;
+            for sb in &parts {
+                prop_assert_eq!(sb.d_range.start, expect);
+                expect = sb.d_range.end;
+            }
+            prop_assert_eq!(expect, g.len());
+
+            for (i, sb) in parts.iter().enumerate() {
+                // Every cell of the piece falls inside its own bounds…
+                for d in sb.d_range.clone() {
+                    let (x, y) = g.d_to_xy(d);
+                    let b = sb.bounds;
+                    prop_assert!(
+                        (b.x..b.x + b.width).contains(&(x as u16)) && (b.y..b.y + b.height).contains(&(y as u16)),
+                        "cell ({},{}) of piece {} escapes its bounds",
+                        x, y, i
+                    );
+                }
+                // …and the bounds are filled exactly (area == cell count). With the contiguous
+                // partition above, equal total area then forces the pieces to be disjoint.
+                prop_assert_eq!(sb.bounds.width as usize * sb.bounds.height as usize, sb.d_range.len());
+                // subblock_at agrees for every d in this piece.
+                for d in sb.d_range.clone() {
+                    prop_assert_eq!(g.subblock_at(d), i);
+                }
+            }
+        }
+    }
 
     /// Every cell of a `w×h` grid is visited exactly once; every step is at most a
     /// diagonal (8-connected, never a real gap); and steps are strictly unit moves
