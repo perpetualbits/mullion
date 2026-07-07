@@ -103,6 +103,7 @@ bitflags! {
 // ── BorderStyle ───────────────────────────────────────────────────────────────
 
 /// Combined description of how a border looks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BorderStyle {
     /// Thickness of the lines.
     pub weight: LineWeight,

@@ -410,6 +410,156 @@ pub fn temporal_overlay(buf: &mut Buffer, cells: &[OverlayCell], phase: f32) {
     }
 }
 
+/// Per-layer visibility for [`callout`], each a `duty` in `[0, 1]` (see [`OverlayCell`]). The
+/// defaults keep **label glyphs fully opaque** (they never dither — always readable) while the
+/// leader wire and the box fill go half see-through so the map breathes through them.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CalloutDuty {
+    /// The lasso ring around the region (a near-opaque one-cell band).
+    pub ring: f32,
+    /// The leader wire from the region to the box (see-through, so it doesn't mask the map).
+    pub leader: f32,
+    /// The box's border.
+    pub box_border: f32,
+    /// The box's interior fill behind the text (see-through). Text glyphs are always opaque.
+    pub box_fill: f32,
+}
+
+impl Default for CalloutDuty {
+    fn default() -> Self {
+        CalloutDuty { ring: 0.85, leader: 0.5, box_border: 0.85, box_fill: 0.5 }
+    }
+}
+
+/// Round a resolved square corner glyph to its light-rounded form (`┌ ┐ └ ┘ → ╭ ╮ ╰ ╯`) when
+/// `rounded`; other glyphs pass through.
+fn round_corner(ch: char, rounded: bool) -> char {
+    if rounded {
+        match ch {
+            '┌' => '╭',
+            '┐' => '╮',
+            '└' => '╰',
+            '┘' => '╯',
+            other => other,
+        }
+    } else {
+        ch
+    }
+}
+
+/// Draw a **callout**: a rounded outline around the `inside` region, a leader wire from
+/// `anchor` to a floating text `box_rect` (with a `●` bookend where it leaves the region), and
+/// the box itself carrying up to `box_rect.height − 2` `lines` — all composited over the
+/// already-painted `buf` via [`temporal_overlay`], so the map shows *through* the chrome. The
+/// per-layer [`CalloutDuty`] keeps the label glyphs opaque while the wire and box-fill dither.
+///
+/// `area` is the region the `inside` predicate is scanned over (the map's rect); `style` styles
+/// the outline/leader/box; `phase` is the shared animation clock. The caller places `box_rect`
+/// (it knows its own free space) and mullion routes the leader to it.
+///
+/// This is a composition of [`draw_region_outline`], [`junction`](crate::junction) leader
+/// routing, [`Panel`](crate::panel::Panel), and [`temporal_overlay`]; reach for those atoms
+/// directly if you need finer control.
+#[allow(clippy::too_many_arguments)]
+pub fn callout(
+    buf: &mut Buffer,
+    area: Rect,
+    inside: impl Fn(u16, u16) -> bool,
+    anchor: (u16, u16),
+    box_rect: Rect,
+    lines: &[&str],
+    style: &BorderStyle,
+    phase: f32,
+    duty: CalloutDuty,
+) {
+    use crate::junction::{resolve, EdgeGrid};
+    use crate::panel::{draw_panel, Panel};
+
+    let rounded = matches!((style.weight, style.corners), (LineWeight::Light, CornerStyle::Rounded));
+    let mut cells: Vec<OverlayCell> = Vec::new();
+
+    // ── the lasso ring — render the outline to a scratch buffer, lift its glyphs ──
+    if area.width > 0 && area.height > 0 {
+        let mut ring = Buffer::empty(area);
+        draw_region_outline(&mut ring, area, &inside, style);
+        for y in area.y..area.y + area.height {
+            for x in area.x..area.x + area.width {
+                let c = ring.get(x, y);
+                if let Some(ch) = c.symbol.chars().next().filter(|&ch| ch != ' ') {
+                    cells.push(OverlayCell { x, y, glyph: ch, style: c.style, duty: duty.ring });
+                }
+            }
+        }
+    }
+
+    // ── the leader — an L from the anchor to the nearest box edge, via an EdgeGrid ──
+    let (ax, ay) = anchor;
+    let (br, bb) = (box_rect.x + box_rect.width.saturating_sub(1), box_rect.y + box_rect.height.saturating_sub(1));
+    let clamp_x = ax.clamp(box_rect.x, br);
+    let clamp_y = ay.clamp(box_rect.y, bb);
+    let attach = if ax < box_rect.x {
+        (box_rect.x, clamp_y)
+    } else if ax > br {
+        (br, clamp_y)
+    } else if ay < box_rect.y {
+        (clamp_x, box_rect.y)
+    } else {
+        (clamp_x, bb)
+    };
+    let (lx0, lx1) = (ax.min(attach.0), ax.max(attach.0));
+    let (ly0, ly1) = (ay.min(attach.1), ay.max(attach.1));
+    let mut lg = EdgeGrid::new(Rect::new(lx0, ly0, lx1 - lx0 + 1, ly1 - ly0 + 1));
+    lg.add_h_line(lx0, lx1, ay, style.weight); // horizontal at the anchor's row
+    lg.add_v_line(ly0, ly1, attach.0, style.weight); // vertical up/down the attach column
+    for y in ly0..=ly1 {
+        for x in lx0..=lx1 {
+            if let Some(ch) = lg.get(x, y).and_then(resolve) {
+                cells.push(OverlayCell { x, y, glyph: round_corner(ch, rounded), style: style.style, duty: duty.leader });
+            }
+        }
+    }
+    // The bookend where the leader leaves the region (drawn last so it wins its cell).
+    cells.push(OverlayCell { x: ax, y: ay, glyph: '●', style: style.style, duty: duty.leader });
+
+    // ── the box — draw a filled panel + the lines to a scratch, classify each cell ──
+    if box_rect.width >= 2 && box_rect.height >= 2 {
+        let fill = Style::default().bg(Color::Rgb(20, 22, 28));
+        let mut bx = Buffer::empty(box_rect);
+        let panel = Panel::new(*style).fill(fill);
+        let interior = draw_panel(&mut bx, box_rect, &panel);
+        let text = Style::default().fg(style.style.fg).bg(Color::Rgb(20, 22, 28));
+        for (i, line) in lines.iter().take(interior.height as usize).enumerate() {
+            let clipped: String = line.chars().take(interior.width as usize).collect();
+            bx.set_string(interior.x, interior.y + i as u16, &clipped, text);
+        }
+        for y in box_rect.y..box_rect.y + box_rect.height {
+            for x in box_rect.x..box_rect.x + box_rect.width {
+                let c = bx.get(x, y);
+                let Some(ch) = c.symbol.chars().next() else { continue };
+                let d = if ch == ' ' {
+                    duty.box_fill // interior fill — the map breathes through
+                } else if is_box_glyph(ch) {
+                    duty.box_border
+                } else {
+                    1.0 // a label glyph — always opaque, never flickers
+                };
+                cells.push(OverlayCell { x, y, glyph: ch, style: c.style, duty: d });
+            }
+        }
+    }
+
+    temporal_overlay(buf, &cells, phase);
+}
+
+/// Whether `ch` is a box-drawing glyph (so a callout classifies it as border, not a label).
+fn is_box_glyph(ch: char) -> bool {
+    matches!(
+        ch,
+        '─' | '│' | '╭' | '╮' | '╰' | '╯' | '┌' | '┐' | '└' | '┘' | '├' | '┤' | '┬' | '┴' | '┼'
+            | '━' | '┃' | '═' | '║' | '╔' | '╗' | '╚' | '╝'
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -673,5 +823,36 @@ mod tests {
                 assert_eq!(buf.get(x, y).symbol, ".", "a non-overlay cell was touched");
             }
         }
+    }
+
+    #[test]
+    fn callout_composites_ring_leader_and_box_with_opaque_labels() {
+        let area = Rect::new(0, 0, 40, 16);
+        let mut buf = Buffer::empty(area);
+        // A base "map" so we can see the callout composite over it.
+        let base = Style::default().fg(Color::Rgb(60, 60, 60));
+        for y in 0..16 {
+            for x in 0..40 {
+                buf.set_char(x, y, '·', base);
+            }
+        }
+        let style = BorderStyle {
+            weight: LineWeight::Light,
+            corners: CornerStyle::Rounded,
+            style: Style::default().fg(Color::Rgb(255, 255, 255)),
+        };
+        let inside = |x: u16, y: u16| (4..=7).contains(&x) && (4..=6).contains(&y);
+        let box_rect = Rect::new(20, 2, 16, 5);
+        let lines = ["host-alpha", "10.0.0.0/24", "vlan 30"];
+        callout(&mut buf, area, inside, (8, 5), box_rect, &lines, &style, 0.0, CalloutDuty::default());
+
+        // Label glyphs are opaque (duty 1.0) → the box text is present at any phase.
+        let row: String = (21..35).map(|x| buf.get(x, 3).symbol.clone()).collect();
+        assert!(row.contains("host-alpha"), "label text not rendered opaquely: {row:?}");
+        // The callout composited a meaningful amount over the base map (ring + leader + box).
+        let changed = (0..16).flat_map(|y| (0..40).map(move |x| (x, y))).filter(|&(x, y)| buf.get(x, y).symbol != "·").count();
+        assert!(changed > 20, "callout drew too little: {changed}");
+        // Cells far from the callout are untouched base.
+        assert_eq!(buf.get(0, 15).symbol, "·");
     }
 }
