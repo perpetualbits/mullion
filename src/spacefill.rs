@@ -453,6 +453,56 @@ impl Gilbert {
             .position(|sb| sb.d_range.contains(&d))
             .unwrap_or_else(|| parts.len().saturating_sub(1))
     }
+
+    /// Reduce a set of grid `cells` to the minimal set of **aligned power-of-two** line-index
+    /// ranges that exactly cover them, ascending. Each returned range `[s, s + 2^k)` has `s` a
+    /// multiple of its length `2^k` — so on a power-of-two grid it is a clean CIDR-aligned block
+    /// that lands on [`subblocks`](Gilbert::subblocks) boundaries. This is how a lassoed
+    /// *snake* (a blob of cells) becomes a short list of aligned blocks a caller can name (e.g.
+    /// as CIDRs). Cells off the grid are ignored; duplicates collapse; `O(n log n)` in the
+    /// cell count.
+    ///
+    /// ```
+    /// use mullion::spacefill::Gilbert;
+    ///
+    /// let g = Gilbert::new(16, 16); // 256 cells; d-space is the whole address line
+    /// // The cells at line indices 4..12 — a contiguous snake that is NOT one aligned block.
+    /// let cells: Vec<_> = (4..12).map(|d| g.d_to_xy(d)).collect();
+    /// // 4..12 covers as [4,8) (a /·, aligned at 4) + [8,12) (aligned at 8): two clean blocks.
+    /// assert_eq!(g.aligned_runs(&cells), vec![4..8, 8..12]);
+    /// ```
+    #[must_use]
+    pub fn aligned_runs(&self, cells: &[(u32, u32)]) -> Vec<core::ops::Range<usize>> {
+        // Cells → sorted, unique line indices.
+        let mut ds: Vec<usize> = cells.iter().filter_map(|&(x, y)| self.xy_to_d(x, y).map(|d| d as usize)).collect();
+        ds.sort_unstable();
+        ds.dedup();
+
+        let mut out = Vec::new();
+        let mut i = 0;
+        while i < ds.len() {
+            // Extend a maximal contiguous run [lo, hi) of consecutive indices.
+            let lo = ds[i];
+            let mut hi = lo + 1;
+            while i + 1 < ds.len() && ds[i + 1] == hi {
+                hi += 1;
+                i += 1;
+            }
+            i += 1;
+            // Cover [lo, hi) with maximal aligned power-of-two blocks.
+            let mut s = lo;
+            while s < hi {
+                // Block size is bounded by s's alignment (largest 2^k dividing s) and the
+                // remaining length, rounded down to a power of two.
+                let by_align = if s == 0 { hi } else { 1usize << s.trailing_zeros() };
+                let limit = by_align.min(hi - s);
+                let size = 1usize << (usize::BITS - 1 - limit.leading_zeros()); // ⌊log2⌋ → prev pow2
+                out.push(s..s + size);
+                s += size;
+            }
+        }
+        out
+    }
 }
 
 /// Whether an allowed region can host a **continuous** (4-connected) space-filling
@@ -769,6 +819,32 @@ mod tests {
                     prop_assert_eq!(g.subblock_at(d), i);
                 }
             }
+        }
+
+        /// `aligned_runs` returns aligned power-of-two ranges that are disjoint, ascending,
+        /// and cover exactly the line indices of the selected cells.
+        #[test]
+        fn aligned_runs_cover_exactly_with_aligned_pow2_blocks(
+            w in 1u32..40,
+            h in 1u32..40,
+            picks in proptest::collection::vec(0usize..1600, 0..200),
+        ) {
+            let g = Gilbert::new(w, h);
+            let want: std::collections::BTreeSet<usize> = picks.into_iter().filter(|&d| d < g.len()).collect();
+            let cells: Vec<(u32, u32)> = want.iter().map(|&d| g.d_to_xy(d)).collect();
+
+            let runs = g.aligned_runs(&cells);
+            let mut covered = std::collections::BTreeSet::new();
+            let mut prev_end = 0usize;
+            for r in &runs {
+                let len = r.end - r.start;
+                prop_assert!(len.is_power_of_two(), "run {:?} length {} not a power of two", r, len);
+                prop_assert_eq!(r.start % len, 0, "run {:?} not aligned to its length", r);
+                prop_assert!(r.start >= prev_end, "runs overlap or descend: {:?} after end {}", r, prev_end);
+                prev_end = r.end;
+                covered.extend(r.clone());
+            }
+            prop_assert_eq!(covered, want, "aligned_runs cover differs from the selected cells");
         }
     }
 

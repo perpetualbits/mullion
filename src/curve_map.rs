@@ -348,6 +348,68 @@ pub fn draw_region_outline(buf: &mut Buffer, area: Rect, inside: impl Fn(u16, u1
     }
 }
 
+/// The 4×4 ordered (Bayer) dither matrix — 16 thresholds spread so neighbouring cells sit on
+/// different sub-phases. The same matrix the video dither uses; here it staggers the temporal
+/// overlay *in space* so the lit fraction crawls rather than blinking globally.
+const BAYER4: [[u8; 4]; 4] = [[0, 8, 2, 10], [12, 4, 14, 6], [3, 11, 1, 9], [15, 7, 13, 5]];
+
+/// One cell of a temporal overlay: a glyph + style to show at `(x, y)`, with a `duty` in
+/// `[0, 1]` giving the fraction of the phase cycle it is *visible* — `1.0` opaque (always
+/// drawn, e.g. a label glyph that must never flicker), `0.5` half see-through (the layer
+/// beneath breathes through, e.g. a leader wire over a busy map), `0.0` never drawn.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct OverlayCell {
+    /// Column.
+    pub x: u16,
+    /// Row.
+    pub y: u16,
+    /// The glyph to show when this cell is on-phase.
+    pub glyph: char,
+    /// The style to paint it in.
+    pub style: Style,
+    /// Visible fraction of the phase cycle, `[0, 1]` (see [`OverlayCell`]).
+    pub duty: f32,
+}
+
+/// Composite a temporal overlay onto an **already-painted** `buf`: for each [`OverlayCell`],
+/// draw its glyph **only on its on-phase**, and otherwise leave the buffer cell untouched —
+/// so whatever was painted underneath (a space-filling curve, a heatmap) *shows through* on
+/// the off-phase. Never clears first, so the see-through is intrinsic.
+///
+/// The on/off decision is a **spatiotemporal ordered dither**: each cell has a threshold from
+/// the [`BAYER4`] matrix keyed on `(x, y)` (so neighbours are staggered *in space*), crawled by
+/// the caller's `phase` (so the lit set advances *in time*). The mean lit fraction is `duty` at
+/// **every** phase — no global luminance swing — so a partly-transparent overlay reads as
+/// smoothly crawling "marching ants", legible even at a slow (≈ 20 Hz) frame clock, rather than
+/// a flicker. Per-cell `duty` lets one call carry an opaque label over a see-through wire.
+///
+/// `phase` is an external `f32` you advance each frame (fractional part is what matters); drive
+/// it from the same animation clock as the rest of the view so everything breathes as one.
+///
+/// ```
+/// use mullion::curve_map::{temporal_overlay, OverlayCell};
+/// use mullion::style::{Color, Style};
+/// use mullion::{Buffer, Rect};
+///
+/// let mut buf = Buffer::empty(Rect::new(0, 0, 8, 1));
+/// let st = Style::default().fg(Color::Rgb(255, 255, 255));
+/// // An opaque label cell (duty 1.0) is drawn at any phase; a half-duty wire cell isn't always.
+/// let cells = [OverlayCell { x: 0, y: 0, glyph: 'A', style: st, duty: 1.0 }];
+/// temporal_overlay(&mut buf, &cells, 0.37);
+/// assert_eq!(buf.get(0, 0).symbol, "A"); // opaque: always shown
+/// ```
+pub fn temporal_overlay(buf: &mut Buffer, cells: &[OverlayCell], phase: f32) {
+    for c in cells {
+        // Per-cell threshold in [0,1): the spatial Bayer offset, crawled by the phase.
+        let base = f32::from(BAYER4[(c.y % 4) as usize][(c.x % 4) as usize]) / 16.0;
+        let threshold = (base + phase).rem_euclid(1.0);
+        if c.duty > threshold {
+            buf.set_char(c.x, c.y, c.glyph, c.style);
+        }
+        // else: off-phase — leave the underlying cell so it shows through.
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -538,5 +600,78 @@ mod tests {
             }
         }
         assert!(drawn > 12, "expected a sizeable single loop, got {drawn} cells");
+    }
+
+    // ── temporal_overlay ──
+
+    fn overlay_block(w: u16, h: u16, glyph: char, duty: f32) -> Vec<OverlayCell> {
+        let st = Style::default().fg(Color::Rgb(220, 220, 220));
+        (0..w)
+            .flat_map(move |x| (0..h).map(move |y| OverlayCell { x, y, glyph, style: st, duty }))
+            .collect()
+    }
+
+    #[test]
+    fn temporal_overlay_opaque_always_transparent_never() {
+        let area = Rect::new(0, 0, 8, 4);
+        // duty 1.0 → drawn at every phase; duty 0.0 → never drawn.
+        for &ph in &[0.0f32, 0.3, 0.7, 0.99, 3.4, -1.2] {
+            let mut opaque = Buffer::empty(area);
+            temporal_overlay(&mut opaque, &overlay_block(8, 4, '#', 1.0), ph);
+            let mut clear = Buffer::empty(area);
+            temporal_overlay(&mut clear, &overlay_block(8, 4, '#', 0.0), ph);
+            for x in 0..8 {
+                for y in 0..4 {
+                    assert_eq!(opaque.get(x, y).symbol, "#", "opaque not drawn at phase {ph}");
+                    assert_eq!(clear.get(x, y).symbol, " ", "transparent drawn at phase {ph}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn temporal_overlay_lit_fraction_tracks_duty_at_every_phase() {
+        // Over a 16×16 block (whole Bayer tiles), the lit fraction is exactly `duty` at phase 0
+        // for a duty that is a multiple of 1/16, and within one Bayer step of `duty·N` at any
+        // phase — i.e. the lit fraction never swings globally (marching ants, not a blink).
+        let area = Rect::new(0, 0, 16, 16);
+        let lit = |buf: &Buffer| (0..16).flat_map(|x| (0..16).map(move |y| (x, y))).filter(|&(x, y)| buf.get(x, y).symbol == "*").count();
+
+        for (duty, exact) in [(0.25f32, 64usize), (0.5, 128), (0.75, 192)] {
+            let mut buf = Buffer::empty(area);
+            temporal_overlay(&mut buf, &overlay_block(16, 16, '*', duty), 0.0);
+            assert_eq!(lit(&buf), exact, "phase-0 lit count for duty {duty}");
+        }
+        for &ph in &[0.13f32, 0.42, 0.88, 5.6, -2.7] {
+            let mut buf = Buffer::empty(area);
+            temporal_overlay(&mut buf, &overlay_block(16, 16, '*', 0.5), ph);
+            assert!((lit(&buf) as i32 - 128).abs() <= 16, "duty 0.5 lit {} swings too far at phase {ph}", lit(&buf));
+        }
+    }
+
+    #[test]
+    fn temporal_overlay_composites_never_clears() {
+        // Paint a base "curve", overlay the top row at half duty: on-phase cells become the
+        // overlay, off-phase cells KEEP the base (never cleared); other cells are untouched.
+        let area = Rect::new(0, 0, 4, 4);
+        let base = Style::default().fg(Color::Rgb(80, 80, 80));
+        let over = Style::default().fg(Color::Rgb(255, 0, 0));
+        let mut buf = Buffer::empty(area);
+        for x in 0..4 {
+            for y in 0..4 {
+                buf.set_char(x, y, '.', base);
+            }
+        }
+        let cells: Vec<_> = (0..4u16).map(|x| OverlayCell { x, y: 0, glyph: '#', style: over, duty: 0.5 }).collect();
+        temporal_overlay(&mut buf, &cells, 0.0);
+        for x in 0..4 {
+            let s = buf.get(x, 0).symbol.clone();
+            assert!(s == "#" || s == ".", "top cell {x} was cleared: {s:?}"); // overlay or base, never blank
+        }
+        for x in 0..4 {
+            for y in 1..4 {
+                assert_eq!(buf.get(x, y).symbol, ".", "a non-overlay cell was touched");
+            }
+        }
     }
 }
