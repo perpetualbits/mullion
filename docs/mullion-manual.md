@@ -1608,6 +1608,20 @@ tapers to zero at a highlighted run's ends (so a selection blends into the curve
 around an arbitrary region of cells (marching-squares over `inside(x,y)`, reusing the
 [`junction`](crate::junction) resolver for tees and crossings) — for subnet / group boundaries.
 
+**Overlays over a live map.** To hang a **lasso / callout** off the map without hiding what's
+underneath, [`temporal_overlay`](crate::curve_map::temporal_overlay) composites an
+[`OverlayCell`](crate::curve_map::OverlayCell) list onto the already-painted buffer as
+**marching ants** — a per-cell spatiotemporal (Bayer) dither so the lit fraction equals each
+cell's `duty` at *every* phase (no global luminance swing), i.e. terminal "transparency" that
+stays legible at a slow frame clock and lets the map show *through* the chrome. `duty` is
+per-cell, so an opaque label glyph rides over a see-through wire in one pass.
+[`callout`](crate::curve_map::callout) packages the whole annotation — a rounded ring, a routed
+leader with a `●` bookend, and a floating labelled box — composited this way with a per-layer
+[`CalloutDuty`](crate::curve_map::CalloutDuty) (labels opaque, wire/fill see-through). Pair it
+with [`Gilbert::aligned_runs`](crate::spacefill::Gilbert::aligned_runs), which reduces a lassoed
+blob of cells to the minimal set of aligned power-of-two `d`-ranges — clean CIDR-shaped blocks a
+caller can name. This is the engine behind canopy's map lasso.
+
 ```rust
 use mullion::curve_map::{fit_dims, render};
 use mullion::spacefill::Gilbert;
@@ -1676,8 +1690,8 @@ engine behind canopy's IP-space map.
 | `diff` | `diff_lines` (LCS line diff), `render_diff_unified`, `DiffOp` |
 | `form` | `FormLayout` (`rows`), `FormRow`, `Validity`, `focus_step`, `render_validity` |
 | `outline` | `render_tree_row`, `render_more_row` (windowed-child "… N more" affordance), `tree_prefix` |
-| `spacefill` | `Gilbert` (`new`, `d_to_xy`, `xy_to_d`, `len`, `cells`, `masked_order`, `subblocks`, `subblock_at`), `gilbert_cells`, `gilbert_d2xy`, `strictly_continuous`, `spanning_curve`, `region_feasibility`, `Feasibility`, `SubBlock` |
-| `curve_map` | `fit_dims`, `cell_glyph`, `render`, `pulse_segment`, `draw_region_outline` (all `curve_map`-scoped, not re-exported) |
+| `spacefill` | `Gilbert` (`new`, `d_to_xy`, `xy_to_d`, `len`, `cells`, `masked_order`, `subblocks`, `subblock_at`, `aligned_runs`), `gilbert_cells`, `gilbert_d2xy`, `strictly_continuous`, `spanning_curve`, `region_feasibility`, `Feasibility`, `SubBlock` |
+| `curve_map` | `fit_dims`, `cell_glyph`, `render`, `pulse_segment`, `draw_region_outline`, `temporal_overlay`, `OverlayCell`, `callout`, `CalloutDuty` (all `curve_map`-scoped, not re-exported) |
 
 `Tree` methods worth knowing: `focus_set`/`focus_next`/`focus_prev`/`focus_first`/
 `focus_last`/`ensure_focus_valid`, `focus_dir`/`focus_dir_cross`,
