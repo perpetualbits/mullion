@@ -3,6 +3,7 @@
 //! A full terminal video player built on the `Video` widget and the temporal-overlay
 //! text compositor. See docs/superpowers/specs/2026-07-08-videoplayer-design.md.
 
+use std::io;
 use std::io::Read;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
@@ -10,9 +11,15 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use crossterm::{
+    cursor::{Hide, Show},
+    event::{Event, KeyCode, KeyEvent, MouseButton, MouseEventKind},
+    execute,
+    terminal::{EnterAlternateScreen, LeaveAlternateScreen},
+};
 use mullion::video::{Frame, Rgb};
 use mullion::{
-    backend::CrosstermBackend,
+    backend::{Backend, CrosstermBackend},
     style::{Color, ColorDepth, Modifier, Style},
     curve_map::{temporal_overlay, OverlayCell},
     video::{Dither, Encoding, Sampling, Video},
@@ -598,18 +605,164 @@ fn render(buf: &mut Buffer, eng: &Engine, view: &View) {
     }
 }
 
-fn main() {
-    // Placeholder main — replaced in Task 7. For now, parse and print the playlist.
-    let spec = std::env::args().skip(1).collect::<Vec<_>>().windows(2)
-        .find(|w| w[0] == "--file").map(|w| w[1].clone());
-    match spec.as_deref().map(parse_tracks) {
-        Some(tracks) if !tracks.is_empty() => {
-            for t in &tracks {
-                println!("video={:?} sub={:?} audio={:?}", t.video, t.subtitle, t.audio);
+/// Is `bin` runnable (on PATH)? Probes `bin -version`.
+fn have(bin: &str) -> bool {
+    Command::new(bin)
+        .arg("-version")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok()
+}
+
+fn main() -> io::Result<()> {
+    let args: Vec<String> = std::env::args().collect();
+    let spec = args.windows(2).find(|w| w[0] == "--file").map(|w| w[1].clone());
+    let playlist = match spec.as_deref().map(parse_tracks) {
+        Some(t) if !t.is_empty() => t,
+        _ => {
+            eprintln!("videoplayer: usage: --file <video[:s:subs.srt][:a:audio]>[,<...>]");
+            std::process::exit(2);
+        }
+    };
+    if !have("ffmpeg") || !have("ffplay") {
+        eprintln!("videoplayer: needs both `ffmpeg` and `ffplay` on PATH.");
+        std::process::exit(1);
+    }
+
+    let backend = CrosstermBackend::new(io::stdout());
+    let mut term = Terminal::new(backend)?;
+    term.enter()?;
+    let eng = Engine::new(playlist, FF_W, FF_H);
+    let result = run(&mut term, eng, View::new());
+    term.leave()?;
+    result
+}
+
+fn run(term: &mut Terminal<CrosstermBackend<io::Stdout>>, mut eng: Engine, mut view: View) -> io::Result<()> {
+    let input = EventReader::new();
+    let budget = Duration::from_millis(33); // ~30 fps
+    let mut hidden = false;
+    let mut hide_deadline: Option<Instant> = None;
+
+    loop {
+        let start = Instant::now();
+
+        for ev in input.drain() {
+            match ev {
+                Event::Key(KeyEvent { code, .. }) => {
+                    view.last_activity = Instant::now();
+                    match code {
+                        KeyCode::Esc => {
+                            if hidden {
+                                return Ok(()); // second esc → exit
+                            }
+                            // First esc: pause, leave the alt screen (keep raw mode + input),
+                            // start the 15s timer, stop drawing.
+                            eng.paused = true;
+                            eng.kill();
+                            execute!(io::stdout(), LeaveAlternateScreen, Show)?;
+                            hidden = true;
+                            hide_deadline = Some(Instant::now() + Duration::from_secs(15));
+                        }
+                        KeyCode::Char(' ') => {
+                            if hidden {
+                                // Resume from hidden: re-enter alt screen, repaint, play.
+                                execute!(io::stdout(), EnterAlternateScreen, Hide)?;
+                                term.clear()?;
+                                hidden = false;
+                                hide_deadline = None;
+                                eng.paused = false;
+                                eng.respawn();
+                            } else {
+                                eng.toggle_pause();
+                            }
+                        }
+                        _ if hidden => {} // other keys are inert while hidden
+                        KeyCode::Char('q') => return Ok(()),
+                        KeyCode::Left => eng.set_speed(rw_speed(eng.speed)),
+                        KeyCode::Right => eng.set_speed(ff_speed(eng.speed)),
+                        KeyCode::Char(',') => eng.prev(),
+                        KeyCode::Char('.') => eng.next(),
+                        // Hidden power keys (defaults stay luma-chroma + temporal).
+                        KeyCode::Char('e') => {
+                            view.encoding = match view.encoding {
+                                Encoding::Braille => Encoding::HalfBlock,
+                                Encoding::HalfBlock => Encoding::LumaChroma,
+                                Encoding::LumaChroma => Encoding::Sextant,
+                                Encoding::Sextant => Encoding::Braille,
+                            }
+                        }
+                        KeyCode::Char('d') => {
+                            view.dither = match view.dither {
+                                Dither::Bayer => Dither::FloydSteinberg,
+                                Dither::FloydSteinberg => Dither::TemporalBayer,
+                                Dither::TemporalBayer => Dither::Bayer,
+                            }
+                        }
+                        KeyCode::Char('n') => {
+                            view.sampling = match view.sampling {
+                                Sampling::Bilinear => Sampling::Nearest,
+                                Sampling::Nearest => Sampling::Bilinear,
+                            }
+                        }
+                        KeyCode::Char('c') => {
+                            view.depth = match view.depth {
+                                ColorDepth::TrueColor => ColorDepth::Palette256,
+                                ColorDepth::Palette256 => ColorDepth::Palette16,
+                                ColorDepth::Palette16 => ColorDepth::TrueColor,
+                            };
+                            term.backend_mut().set_color_depth(view.depth);
+                        }
+                        KeyCode::Char(ch @ '1'..='6') => view.filters[ch as usize - '1' as usize] ^= true,
+                        _ => {}
+                    }
+                }
+                Event::Mouse(me) => {
+                    view.last_activity = Instant::now();
+                    if !hidden && matches!(me.kind, MouseEventKind::Down(MouseButton::Left)) {
+                        // Only trigger a button when the bar is currently visible.
+                        if view.controls_visible() {
+                            let rects = button_rects(bar_area(Rect::new(0, 0, term_w(term)?, term_h(term)?)));
+                            if let Some(b) = hit_test(&rects, me.column, me.row) {
+                                match b {
+                                    Button::Prev => eng.prev(),
+                                    Button::Rewind => eng.set_speed(rw_speed(eng.speed)),
+                                    Button::PlayPause => eng.toggle_pause(),
+                                    Button::Forward => eng.set_speed(ff_speed(eng.speed)),
+                                    Button::Next => eng.next(),
+                                }
+                            }
+                        }
+                    }
+                }
+                _ => {}
             }
         }
-        _ => eprintln!("videoplayer: pass --file a.mp4,b.mp4 (see the module docs)"),
+
+        if hidden {
+            if hide_deadline.map(|d| Instant::now() >= d).unwrap_or(false) {
+                return Ok(()); // 15s timeout → exit
+            }
+            thread::sleep(budget.saturating_sub(start.elapsed()));
+            continue;
+        }
+
+        eng.poll();
+        eng.tick();
+        term.draw(|buf| render(buf, &eng, &view))?;
+        view.frame = view.frame.wrapping_add(1);
+        view.phase = (view.phase + 0.08).fract();
+        thread::sleep(budget.saturating_sub(start.elapsed()));
     }
+}
+
+/// Current terminal width/height via the backend.
+fn term_w(term: &Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<u16> {
+    Ok(term.backend().size()?.width)
+}
+fn term_h(term: &Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<u16> {
+    Ok(term.backend().size()?.height)
 }
 
 #[cfg(test)]
