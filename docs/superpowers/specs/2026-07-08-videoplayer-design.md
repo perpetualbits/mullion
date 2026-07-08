@@ -10,7 +10,8 @@
 Turn the `tv` example into a full terminal video player: real footage decoded through ffmpeg,
 **with sound**, transport controls (play/pause, fast-forward, fast-backward, next, previous)
 drawn as big on-video buttons usable by mouse, touch, and keyboard, an esc-to-hide behaviour that
-restores the shell, and `Encoding::LumaChroma` + `Dither::TemporalBayer` as the defaults.
+restores the shell, optional SRT subtitles and optional per-track separate audio, and
+`Encoding::LumaChroma` + `Dither::TemporalBayer` as the defaults.
 
 `tv.rs` stays intact; this is a new sibling example that reuses its ffmpeg-frame-pump pattern.
 
@@ -30,15 +31,39 @@ restores the shell, and `Encoding::LumaChroma` + `Dither::TemporalBayer` as the 
 
 ```
 cargo run --example videoplayer -- --file a.mp4,b.mp4,c.mp4
+cargo run --example videoplayer -- --file "clip1.mp4:s:clip1.srt:a:song.mp3,clip2.mp4"
 ```
 
-- `--file <csv>` parses a **comma-separated** path list into a `Vec<PathBuf>` playlist.
+- `--file <csv>` parses a **comma-separated** list into a `Vec<Track>` playlist.
 - We do **not** pass the whole list to a single ffmpeg. A single ffmpeg cannot cleanly support
   per-track next/prev seeking, so the playlist is **Rust-managed**: exactly one video ffmpeg + one
   audio ffplay for the *current* track at a time, respawned on control actions. (This is the
   fallback plan for "ffmpeg can't take multiple files as a seekable playlist".)
 - Missing `--file`, empty list, or ffmpeg/ffplay not on PATH → a clear stderr error **before**
   entering the alternate screen (so the message is visible).
+
+### Track entry syntax
+
+Each comma-separated entry is a **compound** describing one track's sources:
+
+```
+<video>[:s:<subtitle.srt>][:a:<audio-file>]
+```
+
+- `<video>` — the video file (required; the first token, up to the first `:s:`/`:a:` marker).
+- `:s:<subtitle.srt>` — optional SRT subtitle file. Missing → no subtitles for that track.
+- `:a:<audio-file>` — optional **separate** audio file to play *instead of* the video's own
+  audio. Missing → audio comes from the video file itself (as before).
+- Markers may appear in either order; the parser scans for the literal `:s:` and `:a:` markers.
+  (Paths containing `:s:`/`:a:` are unsupported — acceptable for an example.)
+
+```rust
+struct Track { video: PathBuf, subtitle: Option<PathBuf>, audio: Option<PathBuf> }
+```
+
+The **audio source file** for a track is `track.audio.clone().unwrap_or(track.video.clone())`.
+The video's own embedded audio is never played directly — ffmpeg only pipes rawvideo (no audio);
+all sound comes from ffplay, pointed at either the separate audio file or the video file.
 
 ## Playback engine — respawn at timestamp
 
@@ -59,11 +84,31 @@ and respawns from the new `(track, media_pos, speed)`:
   -vf scale=W:H -pix_fmt rgb24 -f rawvideo -`
   (`-readrate 1.0` is the modern spelling of the old `-re`; ffmpeg ≥ 5.1. `-ss` before `-i` is a
   fast keyframe seek.)
-- **Audio:** `ffplay -loglevel error -nodisp -vn -autoexit -ss <media_pos> -af atempo=<speed> <file>`
-  — spawned only when audio should sound (see reverse rule below).
+- **Audio:** `ffplay -loglevel error -nodisp -vn -autoexit -ss <media_pos> -af atempo=<speed>
+  <audio-source-file>` — spawned only when audio should sound (see the reverse and
+  audio-exhaustion rules). `<audio-source-file>` is the track's separate `:a:` file if present,
+  else the video file.
 
-Reader thread + newest-frame snapshot are identical to `tv.rs`, generalised so the target
-`(w, h)` and the child handles live in a small `Engine` struct whose `Drop` kills both children.
+ffmpeg is **not** looped (`tv.rs`'s `-stream_loop -1` is dropped): each track's video plays once
+so we can detect its end. Reader thread + newest-frame snapshot are otherwise identical to
+`tv.rs`, generalised so the target `(w, h)` and both child handles live in a small `Engine` struct
+whose `Drop` kills both children.
+
+### End of video → auto-advance
+
+Each loop, poll the video child with `try_wait()`. If it exited **on its own** (not because we
+killed it for a respawn) and the pipe has drained, the track finished → auto-advance to the next
+track (wrap), `media_pos = 0`, `speed = 1`, respawn. Because advancing kills the current ffplay,
+**separate audio always stops at the video's end and never carries into the next track** (the
+"video shorter than audio" rule).
+
+### Separate-audio exhaustion (audio shorter than video)
+
+Per track, track an `audio_exhausted: bool` (reset on track change). Each loop poll the audio child
+with `try_wait()`; if it exited on its own (reached its end, or `-ss` seeked past its end), set
+`audio_exhausted = true`. While `audio_exhausted`, respawns skip ffplay entirely — so a short audio
+file **plays once and stops, never loops**, while the longer video keeps playing silently (the
+"video longer than audio" rule). `we_killed` flag distinguishes our respawn-kills from self-exit.
 
 ### Forward fast-forward (speed 2, 4)
 
@@ -112,6 +157,29 @@ Five big buttons across the **middle 50 %** of the terminal width (≈ ¼ margin
 - Any input reveals them. A **click while the bar is hidden only reveals** (does not trigger a
   button); a click while visible hit-tests the buttons and triggers.
 
+## Subtitles (SRT, parsed + crisp overlay)
+
+When a track has a `:s:` subtitle file, parse it once (on track load) into a `Vec<Cue>`:
+
+```rust
+struct Cue { start: f64, end: f64, lines: Vec<String> } // seconds
+```
+
+- **Parser:** minimal SRT — blocks separated by blank lines; a `HH:MM:SS,mmm --> HH:MM:SS,mmm`
+  timing line; one or more text lines; the numeric index line is ignored. Basic `<i>/<b>`-style
+  tags are stripped. Parse failures for a block are skipped (best-effort), never fatal.
+- **Selection:** each frame, the active cue is the one with `cue.start <= media_pos < cue.end`
+  (linear scan; playlists are short). Because timing is keyed on our own `media_pos`, subtitles
+  stay correct through seek / FF / rewind automatically.
+- **Shorter/longer rules fall out for free:** a subtitle track shorter than the video simply has no
+  cue past its last `end`, so nothing shows after it; cues beyond the video's end are never reached
+  because the video ends (and the track advances) first. No looping, no carry-over.
+- **Rendering:** the active cue is drawn **bottom-centre** of the video area (above the control
+  bar), via `temporal_overlay`: a see-through dark band (`duty ≈ 0.5`, video breathes through)
+  with **opaque** white glyphs (`duty 1.0`, never flicker), lines centred and wrapped to the video
+  width. Subtitles are **content, not chrome** — they show regardless of the auto-hide state of the
+  control bar.
+
 ## Input — mouse, touch, keyboard
 
 - **Mouse & touch:** `Event::Mouse` with `MouseEventKind::Down(MouseButton::Left)` → hit-test
@@ -155,11 +223,13 @@ loop {
     dt = time since last tick
     for ev in input.drain() { handle key / mouse; update last_activity, engine, mode }
     if mode == Exit { break }
+    engine.poll_children()               // video self-exit → auto-advance; audio self-exit → exhausted
     if playing { media_pos += speed * dt; maybe respawn (rewind re-seek cadence / speed change) }
     if mode == Active {
         frame = engine.newest_frame()
         term.draw(|buf| {
             Video::new().encoding(enc).dither(dith).sampling(samp).frame(n).render_frame(buf, video_area, &frame)
+            if let Some(cue) = active_cue(&track.cues, media_pos) { temporal_overlay(buf, &subtitle_cells(cue, video_area, phase), phase) }
             if controls_visible { temporal_overlay(buf, &button_cells(&engine, phase), phase); draw_status(buf) }
         })
         n = n.wrapping_add(1); phase += phase_step
@@ -175,11 +245,16 @@ term.leave()                         // full restore on real exit
   multi-file playlist; drive each control and confirm behaviour end-to-end (`/verify`-style):
   play/pause, ⏩ 2×/4× with sound speeding, ⏪ fast-rewind (muted), next/prev switching tracks,
   mouse-click and keyboard on each button, auto-hide after 3 s and reveal, esc → shell reappears,
-  esc-again exits, 15 s exits, space resumes from hidden.
+  esc-again exits, 15 s exits, space resumes from hidden. Also verify the compound `--file`
+  entries: a `:s:` SRT shows/clears at the right times and survives seeks; a `:a:` separate audio
+  plays over the video; audio shorter than video stops without looping; video shorter than audio
+  cuts the audio at the video's end (no carry into the next track).
 - `cargo build --example videoplayer` must succeed (additive-only gate: the crate still compiles).
 
 ## Non-goals (YAGNI)
 
 - No seek bar scrubbing by mouse drag (progress readout only).
-- No on-disk config, no subtitle/track selection, no volume control.
+- Subtitles: **SRT only** (no `.ass`/`.vtt`), no styling/positioning tags, no subtitle-track
+  selection within a container.
+- No on-disk config, no volume control.
 - No custom audio decoding — ffplay owns audio; mullion owns video pixels only.
