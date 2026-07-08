@@ -594,7 +594,7 @@ fn render(buf: &mut Buffer, eng: &Engine, view: &View) {
         let name = track.video.file_name().and_then(|s| s.to_str()).unwrap_or("?");
         let speed = if eng.paused { "paused".to_string() } else { format!("{}x", eng.speed) };
         let status = format!(
-            " {}/{}  {}  {}  {}   e/d/n/c power keys · esc hide",
+            " {}/{}  {}  {}  {}   space play/pause · ←/→ speed · ,/. prev/next · e/d/n/c/1-6 power · esc hide",
             eng.index + 1, eng.playlist.len(), name, fmt_time(eng.media_pos), speed,
         );
         let sstyle = Style::default().fg(Color::Black).bg(Color::Gray);
@@ -719,19 +719,19 @@ fn run(term: &mut Terminal<CrosstermBackend<io::Stdout>>, mut eng: Engine, mut v
                     }
                 }
                 Event::Mouse(me) => {
+                    // Sample visibility BEFORE resetting the activity clock, so a click that
+                    // merely wakes the auto-hidden bar reveals it without also firing a button.
+                    let was_visible = view.controls_visible();
                     view.last_activity = Instant::now();
-                    if !hidden && matches!(me.kind, MouseEventKind::Down(MouseButton::Left)) {
-                        // Only trigger a button when the bar is currently visible.
-                        if view.controls_visible() {
-                            let rects = button_rects(bar_area(Rect::new(0, 0, term_w(term)?, term_h(term)?)));
-                            if let Some(b) = hit_test(&rects, me.column, me.row) {
-                                match b {
-                                    Button::Prev => eng.prev(),
-                                    Button::Rewind => eng.set_speed(rw_speed(eng.speed)),
-                                    Button::PlayPause => eng.toggle_pause(),
-                                    Button::Forward => eng.set_speed(ff_speed(eng.speed)),
-                                    Button::Next => eng.next(),
-                                }
+                    if !hidden && was_visible && matches!(me.kind, MouseEventKind::Down(MouseButton::Left)) {
+                        let rects = button_rects(bar_area(Rect::new(0, 0, term_w(term)?, term_h(term)?)));
+                        if let Some(b) = hit_test(&rects, me.column, me.row) {
+                            match b {
+                                Button::Prev => eng.prev(),
+                                Button::Rewind => eng.set_speed(rw_speed(eng.speed)),
+                                Button::PlayPause => eng.toggle_pause(),
+                                Button::Forward => eng.set_speed(ff_speed(eng.speed)),
+                                Button::Next => eng.next(),
                             }
                         }
                     }
