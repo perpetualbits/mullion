@@ -445,6 +445,9 @@ fn art(b: Button, playing: bool) -> [&'static str; 3] {
 
 /// Overlay cells for a rounded box: a near-opaque border and a see-through fill.
 fn box_cells(r: Rect, style: Style, border_duty: f32, fill_duty: f32) -> Vec<OverlayCell> {
+    if r.width < 2 || r.height < 2 {
+        return Vec::new();
+    }
     let mut cells = Vec::new();
     let (x0, y0, x1, y1) = (r.x, r.y, r.x + r.width - 1, r.y + r.height - 1);
     for y in y0..=y1 {
@@ -479,6 +482,9 @@ fn button_cells(eng: &Engine, area: Rect) -> Vec<OverlayCell> {
     let glyph_style = Style::default().fg(Color::White).add_modifier(Modifier::BOLD);
     let mut cells = Vec::new();
     for (b, r) in button_rects(bar) {
+        if r.width < 3 || r.height < 3 {
+            continue;
+        }
         cells.extend(box_cells(r, chrome, 0.85, 0.5));
         // Stamp the 3-row art centred in the box interior.
         let lines = art(b, playing);
