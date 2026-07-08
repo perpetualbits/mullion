@@ -3,7 +3,14 @@
 //! A full terminal video player built on the `Video` widget and the temporal-overlay
 //! text compositor. See docs/superpowers/specs/2026-07-08-videoplayer-design.md.
 
+use std::io::Read;
 use std::path::PathBuf;
+use std::process::{Child, Command, Stdio};
+use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::{Duration, Instant};
+
+use mullion::video::{Frame, Rgb};
 use mullion::Rect;
 
 /// One playlist entry: a video, plus optional separate subtitle (SRT) and audio files.
@@ -164,6 +171,227 @@ fn contains(r: Rect, x: u16, y: u16) -> bool {
 /// Which button (if any) covers cell `(x, y)`.
 fn hit_test(rects: &[(Button, Rect)], x: u16, y: u16) -> Option<Button> {
     rects.iter().find(|(_, r)| contains(*r, x, y)).map(|(b, _)| *b)
+}
+
+const FF_W: usize = 320;
+const FF_H: usize = 180;
+
+/// Load and parse a track's SRT file into cues (empty if none / unreadable).
+fn load_cues(track: &Track) -> Vec<Cue> {
+    match &track.subtitle {
+        Some(p) => std::fs::read_to_string(p).map(|s| parse_srt(&s)).unwrap_or_default(),
+        None => Vec::new(),
+    }
+}
+
+/// Owns the child processes and the playback clock. One ffmpeg (video → rawvideo pipe) and one
+/// ffplay (audio) for the current track, respawned from `media_pos` on every control action.
+struct Engine {
+    playlist: Vec<Track>,
+    index: usize,
+    media_pos: f64,
+    speed: f32,
+    paused: bool,
+    w: usize,
+    h: usize,
+    shared: Arc<Mutex<Vec<u8>>>,
+    video: Option<Child>,
+    audio: Option<Child>,
+    audio_exhausted: bool,
+    last_tick: Instant,
+    last_seek: Instant,
+    cues: Vec<Cue>,
+}
+
+impl Engine {
+    fn new(playlist: Vec<Track>, w: usize, h: usize) -> Self {
+        let cues = load_cues(&playlist[0]);
+        let mut e = Engine {
+            playlist,
+            index: 0,
+            media_pos: 0.0,
+            speed: 1.0,
+            paused: false,
+            w,
+            h,
+            shared: Arc::new(Mutex::new(vec![0u8; w * h * 3])),
+            video: None,
+            audio: None,
+            audio_exhausted: false,
+            last_tick: Instant::now(),
+            last_seek: Instant::now(),
+            cues,
+        };
+        e.spawn_current();
+        e
+    }
+
+    /// Spawn ffmpeg (always) and ffplay (only when audio should sound) from `media_pos`.
+    fn spawn_current(&mut self) {
+        let frame_len = self.w * self.h * 3;
+        self.shared = Arc::new(Mutex::new(vec![0u8; frame_len])); // fresh: no stale frames
+        let track = &self.playlist[self.index];
+        let rate = self.speed.abs().max(1.0);
+        let pos = self.media_pos.max(0.0);
+        let mut vchild = Command::new("ffmpeg")
+            .args([
+                "-loglevel", "error",
+                "-readrate", &format!("{rate}"),
+                "-ss", &format!("{pos}"),
+                "-i", track.video.to_str().unwrap_or_default(),
+                "-vf", &format!("scale={}:{}", self.w, self.h),
+                "-pix_fmt", "rgb24",
+                "-f", "rawvideo",
+                "-",
+            ])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn ffmpeg");
+        if let Some(out) = vchild.stdout.take() {
+            let shared = Arc::clone(&self.shared);
+            thread::spawn(move || {
+                let mut out = out;
+                let mut buf = vec![0u8; frame_len];
+                while out.read_exact(&mut buf).is_ok() {
+                    if let Ok(mut g) = shared.lock() {
+                        g.copy_from_slice(&buf);
+                    }
+                }
+            });
+        }
+        self.video = Some(vchild);
+
+        let want_audio = self.speed > 0.0 && !self.paused && !self.audio_exhausted;
+        self.audio = if want_audio {
+            let src = track.audio.clone().unwrap_or_else(|| track.video.clone());
+            // atempo caps at 2.0 per instance on older ffmpeg; chain two for 4×.
+            let atempo = if self.speed >= 4.0 {
+                "atempo=2.0,atempo=2.0".to_string()
+            } else if self.speed > 1.0 {
+                format!("atempo={}", self.speed)
+            } else {
+                "atempo=1.0".to_string()
+            };
+            Command::new("ffplay")
+                .args([
+                    "-loglevel", "error",
+                    "-nodisp", "-vn", "-autoexit",
+                    "-ss", &format!("{pos}"),
+                    "-af", &atempo,
+                    src.to_str().unwrap_or_default(),
+                ])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .ok()
+        } else {
+            None
+        };
+        self.last_tick = Instant::now();
+        self.last_seek = Instant::now();
+    }
+
+    fn kill(&mut self) {
+        if let Some(mut c) = self.video.take() {
+            let _ = c.kill();
+            let _ = c.wait();
+        }
+        if let Some(mut c) = self.audio.take() {
+            let _ = c.kill();
+            let _ = c.wait();
+        }
+    }
+
+    fn respawn(&mut self) {
+        self.kill();
+        self.spawn_current();
+    }
+
+    /// Snapshot the newest decoded frame into a `Frame`.
+    fn newest_frame(&self) -> Frame {
+        let g = self.shared.lock().unwrap();
+        let pixels: Vec<Rgb> = (0..self.w * self.h).map(|i| (g[i * 3], g[i * 3 + 1], g[i * 3 + 2])).collect();
+        Frame::from_rgb(self.w, self.h, pixels)
+    }
+
+    /// Poll children: a video that exited on its own → the track finished → advance; an audio
+    /// that exited on its own → it ran out → mark exhausted (don't respawn it for this track).
+    fn poll(&mut self) {
+        if let Some(ch) = self.video.as_mut() {
+            if matches!(ch.try_wait(), Ok(Some(_))) {
+                self.next();
+                return;
+            }
+        }
+        if let Some(ch) = self.audio.as_mut() {
+            if matches!(ch.try_wait(), Ok(Some(_))) {
+                self.audio = None;
+                self.audio_exhausted = true;
+            }
+        }
+    }
+
+    /// Advance the media clock; handle the rewind re-seek cadence and the clamp at zero.
+    fn tick(&mut self) {
+        let now = Instant::now();
+        let dt = (now - self.last_tick).as_secs_f64();
+        self.last_tick = now;
+        if self.paused {
+            return;
+        }
+        self.media_pos += self.speed as f64 * dt;
+        if self.media_pos <= 0.0 {
+            self.media_pos = 0.0;
+            self.speed = 1.0;
+            self.respawn();
+            return;
+        }
+        // Rewind can't stream backward; respawn ffmpeg at the new earlier position ~4×/sec.
+        if self.speed < 0.0 && now.duration_since(self.last_seek) >= Duration::from_millis(250) {
+            self.respawn();
+        }
+    }
+
+    fn set_speed(&mut self, s: f32) {
+        self.speed = s;
+        if !self.paused {
+            self.respawn();
+        }
+    }
+
+    fn toggle_pause(&mut self) {
+        self.paused = !self.paused;
+        if self.paused {
+            self.kill();
+        } else {
+            self.respawn();
+        }
+    }
+
+    fn goto(&mut self, index: usize) {
+        self.index = index % self.playlist.len();
+        self.media_pos = 0.0;
+        self.speed = 1.0;
+        self.audio_exhausted = false;
+        self.paused = false;
+        self.cues = load_cues(&self.playlist[self.index]);
+        self.respawn();
+    }
+
+    fn next(&mut self) {
+        self.goto(self.index + 1);
+    }
+
+    fn prev(&mut self) {
+        self.goto(self.index + self.playlist.len() - 1);
+    }
+}
+
+impl Drop for Engine {
+    fn drop(&mut self) {
+        self.kill();
+    }
 }
 
 fn main() {
