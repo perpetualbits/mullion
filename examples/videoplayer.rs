@@ -4,6 +4,7 @@
 //! text compositor. See docs/superpowers/specs/2026-07-08-videoplayer-design.md.
 
 use std::path::PathBuf;
+use mullion::Rect;
 
 /// One playlist entry: a video, plus optional separate subtitle (SRT) and audio files.
 /// Syntax per comma-separated entry: `<video>[:s:<subs.srt>][:a:<audio>]` (markers in any order).
@@ -125,6 +126,46 @@ fn fmt_time(secs: f64) -> String {
     if h > 0 { format!("{h}:{m:02}:{sec:02}") } else { format!("{m}:{sec:02}") }
 }
 
+/// The five transport buttons, left to right.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Button { Prev, Rewind, PlayPause, Forward, Next }
+
+const BUTTONS: [Button; 5] = [Button::Prev, Button::Rewind, Button::PlayPause, Button::Forward, Button::Next];
+
+/// The control-bar rect: middle 50% of the width (¼ margin each side), 5 rows tall, a couple
+/// rows above the bottom edge.
+fn bar_area(area: Rect) -> Rect {
+    let w = area.width / 2;
+    let x = area.width / 4;
+    let h = 5.min(area.height);
+    let y = area.height.saturating_sub(h + 2);
+    Rect::new(x, y, w, h)
+}
+
+/// Split the bar into five equal button columns (the last absorbs any remainder).
+fn button_rects(bar: Rect) -> Vec<(Button, Rect)> {
+    let bw = bar.width / 5;
+    BUTTONS
+        .iter()
+        .enumerate()
+        .map(|(i, b)| {
+            let x = bar.x + i as u16 * bw;
+            let w = if i == 4 { bar.width - 4 * bw } else { bw };
+            (*b, Rect::new(x, bar.y, w, bar.height))
+        })
+        .collect()
+}
+
+/// Point-in-rect (half-open on the far edges).
+fn contains(r: Rect, x: u16, y: u16) -> bool {
+    x >= r.x && x < r.x + r.width && y >= r.y && y < r.y + r.height
+}
+
+/// Which button (if any) covers cell `(x, y)`.
+fn hit_test(rects: &[(Button, Rect)], x: u16, y: u16) -> Option<Button> {
+    rects.iter().find(|(_, r)| contains(*r, x, y)).map(|(b, _)| *b)
+}
+
 fn main() {
     // Placeholder main — replaced in Task 7. For now, parse and print the playlist.
     let spec = std::env::args().skip(1).collect::<Vec<_>>().windows(2)
@@ -210,5 +251,27 @@ mod tests {
         assert_eq!(fmt_time(0.0), "0:00");
         assert_eq!(fmt_time(65.0), "1:05");
         assert_eq!(fmt_time(3661.0), "1:01:01");
+    }
+
+    #[test]
+    fn bar_is_middle_half() {
+        let bar = bar_area(Rect::new(0, 0, 80, 24));
+        assert_eq!(bar.x, 20);
+        assert_eq!(bar.width, 40); // middle 50%, 20 cols margin each side
+        assert_eq!(bar.height, 5);
+    }
+
+    #[test]
+    fn hit_test_maps_columns_to_buttons() {
+        let bar = bar_area(Rect::new(0, 0, 80, 24));
+        let rects = button_rects(bar);
+        assert_eq!(rects.len(), 5);
+        // Middle of the bar → the middle (PlayPause) button.
+        assert_eq!(hit_test(&rects, 40, bar.y + 2), Some(Button::PlayPause));
+        // Far left of the bar → Prev.
+        assert_eq!(hit_test(&rects, bar.x, bar.y), Some(Button::Prev));
+        // Outside the bar → nothing.
+        assert_eq!(hit_test(&rects, 0, 0), None);
+        assert_eq!(hit_test(&rects, 40, 0), None);
     }
 }
