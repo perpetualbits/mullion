@@ -108,6 +108,23 @@ fn active_cue(cues: &[Cue], t: f64) -> Option<&Cue> {
     cues.iter().find(|c| c.start <= t && t < c.end)
 }
 
+/// Fast-forward speed cycle: anything ≤1 (incl. rewind) → 2, 2 → 4, 4 → back to 1.
+fn ff_speed(s: f32) -> f32 {
+    if s >= 4.0 { 1.0 } else if s >= 2.0 { 4.0 } else { 2.0 }
+}
+
+/// Rewind speed cycle: anything ≥1 (incl. forward FF) → -2, -2 → -4, -4 → back to 1.
+fn rw_speed(s: f32) -> f32 {
+    if s <= -4.0 { 1.0 } else if s <= -2.0 { -4.0 } else { -2.0 }
+}
+
+/// Format a duration in seconds as `m:ss` (or `h:mm:ss` past an hour).
+fn fmt_time(secs: f64) -> String {
+    let s = secs.max(0.0) as u64;
+    let (h, m, sec) = (s / 3600, (s % 3600) / 60, s % 60);
+    if h > 0 { format!("{h}:{m:02}:{sec:02}") } else { format!("{m}:{sec:02}") }
+}
+
 fn main() {
     // Placeholder main — replaced in Task 7. For now, parse and print the playlist.
     let spec = std::env::args().skip(1).collect::<Vec<_>>().windows(2)
@@ -174,5 +191,24 @@ mod tests {
         assert!(active_cue(&cues, 3.5).is_none()); // end is exclusive
         assert_eq!(active_cue(&cues, 4.2).unwrap().start, 4.0);
         assert!(active_cue(&cues, 99.0).is_none()); // past the last cue → nothing
+    }
+
+    #[test]
+    fn speed_cycles() {
+        assert_eq!(ff_speed(1.0), 2.0);
+        assert_eq!(ff_speed(2.0), 4.0);
+        assert_eq!(ff_speed(4.0), 1.0);
+        assert_eq!(ff_speed(-2.0), 2.0); // forward from a rewind state
+        assert_eq!(rw_speed(1.0), -2.0);
+        assert_eq!(rw_speed(-2.0), -4.0);
+        assert_eq!(rw_speed(-4.0), 1.0);
+        assert_eq!(rw_speed(4.0), -2.0); // rewind from a fast-forward state
+    }
+
+    #[test]
+    fn time_format() {
+        assert_eq!(fmt_time(0.0), "0:00");
+        assert_eq!(fmt_time(65.0), "1:05");
+        assert_eq!(fmt_time(3661.0), "1:01:01");
     }
 }
