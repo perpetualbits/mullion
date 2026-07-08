@@ -95,6 +95,10 @@ name = "tv"
 path = "examples/tv.rs"
 
 [[example]]
+name = "videoplayer"
+path = "examples/videoplayer.rs"
+
+[[example]]
 name = "teach"
 path = "examples/teach.rs"
 
