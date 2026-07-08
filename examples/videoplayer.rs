@@ -11,7 +11,13 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use mullion::video::{Frame, Rgb};
-use mullion::Rect;
+use mullion::{
+    backend::CrosstermBackend,
+    style::{Color, ColorDepth, Modifier, Style},
+    curve_map::{temporal_overlay, OverlayCell},
+    video::{Dither, Encoding, Sampling, Video},
+    Buffer, EventReader, Rect, Terminal,
+};
 
 /// One playlist entry: a video, plus optional separate subtitle (SRT) and audio files.
 /// Syntax per comma-separated entry: `<video>[:s:<subs.srt>][:a:<audio>]` (markers in any order).
@@ -391,6 +397,198 @@ impl Engine {
 impl Drop for Engine {
     fn drop(&mut self) {
         self.kill();
+    }
+}
+
+/// View-side (non-playback) state: display modes and the auto-hide clock.
+struct View {
+    encoding: Encoding,
+    dither: Dither,
+    sampling: Sampling,
+    depth: ColorDepth,
+    filters: [bool; 6],
+    frame: u32,
+    phase: f32,
+    last_activity: Instant,
+}
+
+impl View {
+    fn new() -> Self {
+        View {
+            encoding: Encoding::LumaChroma,
+            dither: Dither::TemporalBayer,
+            sampling: Sampling::default(),
+            depth: ColorDepth::TrueColor,
+            filters: [false; 6],
+            frame: 0,
+            phase: 0.0,
+            last_activity: Instant::now(),
+        }
+    }
+    /// The control bar + status are shown for ~3s after the last input.
+    fn controls_visible(&self) -> bool {
+        self.last_activity.elapsed() < Duration::from_secs(3)
+    }
+}
+
+/// Three-row block-art for a button's glyph. PlayPause depends on `playing`.
+fn art(b: Button, playing: bool) -> [&'static str; 3] {
+    match b {
+        Button::Prev => ["▐◀ ", "▐◀◀", "▐◀ "],
+        Button::Rewind => ["◀◀ ", "◀◀◀", "◀◀ "],
+        Button::PlayPause if playing => ["▐ ▐", "▐ ▐", "▐ ▐"],
+        Button::PlayPause => [" ▶ ", " ▶▶", " ▶ "],
+        Button::Forward => ["▶▶ ", "▶▶▶", "▶▶ "],
+        Button::Next => ["▶▶▐", "▶▶▐", "▶▶▐"],
+    }
+}
+
+/// Overlay cells for a rounded box: a near-opaque border and a see-through fill.
+fn box_cells(r: Rect, style: Style, border_duty: f32, fill_duty: f32) -> Vec<OverlayCell> {
+    let mut cells = Vec::new();
+    let (x0, y0, x1, y1) = (r.x, r.y, r.x + r.width - 1, r.y + r.height - 1);
+    for y in y0..=y1 {
+        for x in x0..=x1 {
+            let glyph = match (x, y) {
+                _ if x == x0 && y == y0 => '╭',
+                _ if x == x1 && y == y0 => '╮',
+                _ if x == x0 && y == y1 => '╰',
+                _ if x == x1 && y == y1 => '╯',
+                _ if y == y0 || y == y1 => '─',
+                _ if x == x0 || x == x1 => '│',
+                _ => ' ',
+            };
+            let border = glyph != ' ';
+            cells.push(OverlayCell {
+                x,
+                y,
+                glyph,
+                style,
+                duty: if border { border_duty } else { fill_duty },
+            });
+        }
+    }
+    cells
+}
+
+/// Overlay cells for all five big buttons composited over the video.
+fn button_cells(eng: &Engine, area: Rect) -> Vec<OverlayCell> {
+    let bar = bar_area(area);
+    let playing = !eng.paused;
+    let chrome = Style::default().fg(Color::White);
+    let glyph_style = Style::default().fg(Color::White).add_modifier(Modifier::BOLD);
+    let mut cells = Vec::new();
+    for (b, r) in button_rects(bar) {
+        cells.extend(box_cells(r, chrome, 0.85, 0.5));
+        // Stamp the 3-row art centred in the box interior.
+        let lines = art(b, playing);
+        let art_w = lines.iter().map(|l| l.chars().count()).max().unwrap_or(0) as u16;
+        let cx = r.x + r.width.saturating_sub(art_w) / 2;
+        let cy = r.y + r.height.saturating_sub(3) / 2;
+        for (dy, line) in lines.iter().enumerate() {
+            for (dx, ch) in line.chars().enumerate() {
+                if ch != ' ' {
+                    cells.push(OverlayCell { x: cx + dx as u16, y: cy + dy as u16, glyph: ch, style: glyph_style, duty: 1.0 });
+                }
+            }
+        }
+    }
+    cells
+}
+
+/// Overlay cells for the active subtitle cue: a see-through dark band with opaque white text,
+/// centred just above the control bar.
+fn subtitle_cells(cue: &Cue, area: Rect) -> Vec<OverlayCell> {
+    let bar = bar_area(area);
+    let max_w = area.width.saturating_sub(4).max(1) as usize;
+    // Wrap each source line to the video width.
+    let mut wrapped: Vec<String> = Vec::new();
+    for line in &cue.lines {
+        let mut cur = String::new();
+        for word in line.split_whitespace() {
+            if !cur.is_empty() && cur.chars().count() + 1 + word.chars().count() > max_w {
+                wrapped.push(std::mem::take(&mut cur));
+            }
+            if !cur.is_empty() {
+                cur.push(' ');
+            }
+            cur.push_str(word);
+        }
+        if !cur.is_empty() {
+            wrapped.push(cur);
+        }
+    }
+    let n = wrapped.len() as u16;
+    if n == 0 {
+        return Vec::new();
+    }
+    let top = bar.y.saturating_sub(n + 1);
+    let band = Style::default().fg(Color::White).bg(Color::Rgb(10, 10, 10));
+    let text = Style::default().fg(Color::White).add_modifier(Modifier::BOLD);
+    let mut cells = Vec::new();
+    for (i, line) in wrapped.iter().enumerate() {
+        let y = top + i as u16;
+        let lw = line.chars().count() as u16;
+        let start = area.x + area.width.saturating_sub(lw) / 2;
+        // See-through band across the text span (+1 cell padding each side).
+        for x in start.saturating_sub(1)..(start + lw + 1).min(area.x + area.width) {
+            cells.push(OverlayCell { x, y, glyph: ' ', style: band, duty: 0.5 });
+        }
+        for (dx, ch) in line.chars().enumerate() {
+            cells.push(OverlayCell { x: start + dx as u16, y, glyph: ch, style: text, duty: 1.0 });
+        }
+    }
+    cells
+}
+
+/// Draw one full frame: video, then subtitles, then (if visible) the control bar + status.
+fn render(buf: &mut Buffer, eng: &Engine, view: &View) {
+    let area = buf.area;
+    if area.height < 6 {
+        return;
+    }
+    let frame = eng.newest_frame();
+    let mut video = Video::new()
+        .encoding(view.encoding)
+        .dither(view.dither)
+        .sampling(view.sampling)
+        .frame(view.frame);
+    // Faithful by default; filters are the hidden power-keys extras.
+    let filter_list = [
+        mullion::video::Filter::Scanlines(0.4),
+        mullion::video::Filter::Vignette(0.6),
+        mullion::video::Filter::Phosphor { hue: 40.0, sat: 0.7 },
+        mullion::video::Filter::Gamma(1.8),
+        mullion::video::Filter::Saturation(1.8),
+        mullion::video::Filter::Grayscale,
+    ];
+    for (i, &on) in view.filters.iter().enumerate() {
+        if on {
+            video = video.filter(filter_list[i]);
+        }
+    }
+    video.render_frame(buf, area, &frame);
+
+    // Subtitles are content: always shown regardless of auto-hide.
+    if let Some(cue) = active_cue(&eng.cues, eng.media_pos) {
+        temporal_overlay(buf, &subtitle_cells(cue, area), view.phase);
+    }
+
+    if view.controls_visible() {
+        temporal_overlay(buf, &button_cells(eng, area), view.phase);
+        // Status line at the very bottom.
+        let track = &eng.playlist[eng.index];
+        let name = track.video.file_name().and_then(|s| s.to_str()).unwrap_or("?");
+        let speed = if eng.paused { "paused".to_string() } else { format!("{}x", eng.speed) };
+        let status = format!(
+            " {}/{}  {}  {}  {}   e/d/n/c power keys · esc hide",
+            eng.index + 1, eng.playlist.len(), name, fmt_time(eng.media_pos), speed,
+        );
+        let sstyle = Style::default().fg(Color::Black).bg(Color::Gray);
+        for x in 0..area.width {
+            buf.set_string(x, area.height - 1, " ", sstyle);
+        }
+        buf.set_string(0, area.height - 1, &status, sstyle);
     }
 }
 
