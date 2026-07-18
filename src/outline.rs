@@ -12,7 +12,22 @@
 use crate::buffer::{Buffer, Cell};
 use crate::geometry::Rect;
 use crate::text::{elide, render_line, shape_line, TextCtx};
-use crate::Theme;
+use crate::{Style, Theme};
+
+/// Width of the leading status gutter reserved by [`render_tree_row_decorated`]:
+/// one glyph cell + one space. The glyph MUST be display width 1 so decorated
+/// and calm rows stay column-aligned.
+const DECO_GUTTER_W: u16 = 2;
+
+/// A one-cell status glyph painted in a tree row's leading gutter — a health
+/// tier, a replication state, a sync marker. The `style` is the glyph's own
+/// (kept even when the row is `selected`), so severity/status colour stays
+/// legible on the focused row. Generic on purpose: the app supplies the glyph
+/// and colour; mullion only reserves the column and paints it.
+pub struct RowDecoration<'a> {
+    pub glyph: &'a str,
+    pub style: Style,
+}
 
 /// The guide prefix for a row: one `│  `/`   ` per ancestor level, the `├─ `/`└─ `
 /// connector for this node, then an optional `▾ `/`▸ ` expander.
@@ -51,6 +66,46 @@ pub fn render_tree_row(
     theme:         &Theme,
     ctx:           TextCtx,
 ) {
+    render_tree_row_inner(buf, rect, ancestor_last, is_last, expanded, label,
+        selected, theme, ctx, false, None);
+}
+
+/// Like [`render_tree_row`], but reserves a fixed leading gutter (glyph + space)
+/// before the guides and paints `deco` there in its own [`RowDecoration::style`].
+/// `deco == None` leaves the reserved gutter blank, so decorated and calm rows
+/// stay column-aligned. The guides + label render in the remaining width exactly
+/// as [`render_tree_row`] does. The glyph must be display width 1.
+#[allow(clippy::too_many_arguments)]
+pub fn render_tree_row_decorated(
+    buf:           &mut Buffer,
+    rect:          Rect,
+    ancestor_last: &[bool],
+    is_last:       bool,
+    expanded:      Option<bool>,
+    label:         &str,
+    selected:      bool,
+    theme:         &Theme,
+    ctx:           TextCtx,
+    deco:          Option<RowDecoration>,
+) {
+    render_tree_row_inner(buf, rect, ancestor_last, is_last, expanded, label,
+        selected, theme, ctx, true, deco);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_tree_row_inner(
+    buf:           &mut Buffer,
+    rect:          Rect,
+    ancestor_last: &[bool],
+    is_last:       bool,
+    expanded:      Option<bool>,
+    label:         &str,
+    selected:      bool,
+    theme:         &Theme,
+    ctx:           TextCtx,
+    reserve_gutter: bool,
+    deco:          Option<RowDecoration>,
+) {
     if rect.width == 0 || rect.height == 0 {
         return;
     }
@@ -60,16 +115,37 @@ pub fn render_tree_row(
     let guide_style = if selected { theme.selection } else { theme.text_dim };
     let label_style = if selected { theme.selection } else { theme.text };
 
+    let mut x = rect.x;
+    let mut avail = rect.width;
+    if reserve_gutter {
+        let gw = DECO_GUTTER_W.min(avail);
+        if gw >= 1 {
+            // Always paint the glyph cell (a space when calm) so no stale glyph
+            // from a prior frame lingers, regardless of whether the caller
+            // clears the buffer. The glyph keeps its own style; a calm cell uses
+            // the row's base style.
+            match deco {
+                Some(RowDecoration { glyph, style }) => { buf.set_string(x, rect.y, glyph, style); }
+                None => { buf.set_string(x, rect.y, " ", label_style); }
+            }
+        }
+        x += gw;
+        avail = avail.saturating_sub(gw);
+    }
+    if avail == 0 {
+        return;
+    }
+
     // Guides are box-drawing characters — always LTR.
     let prefix = tree_prefix(ancestor_last, is_last, expanded);
     let pline = shape_line(&prefix, 0, crate::text::BaseDirection::Ltr);
-    let pw = render_line(buf, rect.x, rect.y, &pline, rect.width, guide_style);
+    let pw = render_line(buf, x, rect.y, &pline, avail, guide_style);
 
-    if pw < rect.width {
-        let avail = rect.width - pw;
+    if pw < avail {
+        let rem = avail - pw;
         let full = shape_line(label, 0, ctx.base);
-        let line = if full.width() <= avail { full } else { elide(label, avail, ctx) };
-        render_line(buf, rect.x + pw, rect.y, &line, avail, label_style);
+        let line = if full.width() <= rem { full } else { elide(label, rem, ctx) };
+        render_line(buf, x + pw, rect.y, &line, rem, label_style);
     }
 }
 
@@ -165,5 +241,53 @@ mod tests {
         let row: String = (0..20).map(|x| buf.get(x, 0).symbol.chars().next().unwrap_or(' ')).collect();
         // Same guide column as a last child (no expander), then the dim ellipsis.
         assert!(row.starts_with("│  └─ … 42 more"), "got {row:?}");
+    }
+
+    #[test]
+    fn decorated_row_reserves_gutter_and_paints_glyph() {
+        let theme = Theme::default();
+        let mut term = Terminal::new(TestBackend::new(20, 1)).unwrap();
+        term.draw(|buf| {
+            render_tree_row_decorated(
+                buf, Rect::new(0, 0, 20, 1), &[false], true, Some(false), "users",
+                false, &theme, TextCtx::LTR,
+                Some(RowDecoration { glyph: "◆", style: theme.warn }));
+        }).unwrap();
+        let buf = term.backend().buffer();
+        let row: String = (0..20).map(|x| buf.get(x, 0).symbol.chars().next().unwrap_or(' ')).collect();
+        // Glyph at col 0, one space, then the SAME guide/label as render_tree_row.
+        assert!(row.starts_with("◆ │  └─ ▸ users"), "got {row:?}");
+        assert_eq!(buf.get(0, 0).symbol, "◆");
+        assert_eq!(buf.get(0, 0).style, theme.warn, "glyph keeps its own style");
+    }
+
+    #[test]
+    fn decorated_calm_row_blank_gutter_but_aligned() {
+        let theme = Theme::default();
+        let mut term = Terminal::new(TestBackend::new(20, 1)).unwrap();
+        term.draw(|buf| {
+            render_tree_row_decorated(
+                buf, Rect::new(0, 0, 20, 1), &[false], true, Some(false), "users",
+                false, &theme, TextCtx::LTR, None);
+        }).unwrap();
+        let buf = term.backend().buffer();
+        let row: String = (0..20).map(|x| buf.get(x, 0).symbol.chars().next().unwrap_or(' ')).collect();
+        // No glyph, but guides start at the SAME col 2 as a decorated row (aligned).
+        assert!(row.starts_with("  │  └─ ▸ users"), "got {row:?}");
+    }
+
+    #[test]
+    fn decorated_glyph_survives_selection() {
+        let theme = Theme::default();
+        let mut term = Terminal::new(TestBackend::new(20, 1)).unwrap();
+        term.draw(|buf| {
+            render_tree_row_decorated(
+                buf, Rect::new(0, 0, 20, 1), &[], true, None, "web01",
+                true, &theme, TextCtx::LTR,
+                Some(RowDecoration { glyph: "⚠", style: theme.error }));
+        }).unwrap();
+        let buf = term.backend().buffer();
+        assert_eq!(buf.get(0, 0).symbol, "⚠");
+        assert_eq!(buf.get(0, 0).style, theme.error, "severity style wins over selection on the glyph");
     }
 }
